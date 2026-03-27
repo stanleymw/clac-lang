@@ -1,7 +1,7 @@
 mod types;
 use std::{
     collections::HashMap,
-    io::{self, Write},
+    io::{self, BufRead, BufReader, Read, Write},
 };
 
 use types::*;
@@ -53,6 +53,7 @@ fn execute(
     stack: &mut ClacStack,
     token: &Token,
 ) -> Result<ExecRes, ExecError> {
+    // println!("{:?}", stack);
     match token {
         &Token::Literal(n) => {
             stack.push(n);
@@ -105,9 +106,7 @@ fn execute(
         &Token::If => {
             let cond = stack.pop().ok_or(ExecError::MissingArguments)?;
             if cond == 0 {
-                stack.pop().ok_or(ExecError::IfStatementCouldNotSkip)?;
-                stack.pop().ok_or(ExecError::IfStatementCouldNotSkip)?;
-                stack.pop().ok_or(ExecError::IfStatementCouldNotSkip)?;
+                return Ok(ExecRes::Skip(3));
             }
             Ok(ExecRes::Executed)
         }
@@ -270,7 +269,6 @@ fn repl(state: &mut ClacState) -> Result<(), ExecError> {
 
 fn main() -> Result<(), ExecError> {
     use std::ops::*;
-
     use types::Function::*;
 
     let mut state: ClacState = ClacState {
@@ -295,6 +293,28 @@ fn main() -> Result<(), ExecError> {
             .map(|(name, x)| (name.to_string(), x)),
         ),
     };
+
+    let mut args = std::env::args();
+    if let Some(n) = args.nth(1) {
+        let mut file = std::fs::File::open(n).expect("Could not open file");
+
+        let mut buf: String = String::new();
+        let out = file.read_to_string(&mut buf).expect("Could not read file");
+
+        match exec_str(&buf, &mut state) {
+            Ok(ExecRes::Executed) => {}
+            Ok(ExecRes::Quit) => {
+                return Ok(());
+            }
+            Ok(ExecRes::Skip(_)) => unreachable!(),
+            Err(e) => {
+                println!("{:?}", e);
+                return Err(e);
+            }
+        }
+    }
+
+    println!("{:#?}", state);
 
     repl(&mut state)
 }

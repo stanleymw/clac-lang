@@ -37,6 +37,7 @@ pub enum Token {
 
 type Code = Vec<Token>;
 
+#[derive(Debug)]
 pub enum Function {
     Clac(Code),
     Native2(fn(Value, Value) -> Value),
@@ -44,6 +45,7 @@ pub enum Function {
 
 pub type FuncMap = HashMap<String, Function>;
 
+#[derive(Debug)]
 pub struct ClacState {
     pub stack: ClacStack,
     pub functions: FuncMap,
