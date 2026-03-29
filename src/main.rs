@@ -46,13 +46,9 @@ fn execute<'cs>(
         }
         (_, Token::Quit) => Ok(ExecRes::Quit),
         (_, Token::Function(name)) => match functions.get(name) {
-            Some(types::Function::Clac(f)) => {
-                // execute_line_no_funcs(functions, stack, f.into_iter())
-                Ok(ExecRes::RecursiveCall(f))
-            }
+            Some(types::Function::Clac(f)) => Ok(ExecRes::RecursiveCall(f)),
             Some(types::Function::Native(f)) => {
                 f(stack);
-
                 Ok(ExecRes::Executed)
             }
             Some(types::Function::ClacOp(f)) => {
@@ -69,24 +65,18 @@ fn execute<'cs>(
             stack.pop();
             Ok(ExecRes::Executed)
         }
-        (_, Token::Print) => Err(ExecError::MissingArguments),
         ([.., _], Token::Drop) => {
             stack.pop().expect("unreachable");
             Ok(ExecRes::Executed)
         }
-        (_, Token::Drop) => Err(ExecError::MissingArguments),
         ([.., x, y], Token::Swap) => {
             std::mem::swap(x, y);
             Ok(ExecRes::Executed)
         }
-        (_, Token::Swap) => Err(ExecError::MissingArguments),
         ([.., x, y, z], Token::Rot) => {
-            // let (ox, oy, oz) = (*x, *y, *z);
             (*x, *y, *z) = (*y, *z, *x);
-
             Ok(ExecRes::Executed)
         }
-        (_, Token::Rot) => Err(ExecError::MissingArguments),
         ([.., 0], Token::If) => {
             stack.pop().unwrap();
 
@@ -97,7 +87,6 @@ fn execute<'cs>(
 
             Ok(ExecRes::Executed)
         }
-        (_, Token::If) => Err(ExecError::MissingArguments),
         ([.., n], Token::Skip) => {
             let n = *n;
             stack.pop();
@@ -105,24 +94,27 @@ fn execute<'cs>(
                 n.try_into().map_err(|_| ExecError::InvalidSkip)?,
             ))
         }
-        (_, Token::Skip) => Err(ExecError::MissingArguments),
         ([.., n], Token::Pick) if (*n > 0) => {
             let conv: usize = (*n).try_into().unwrap();
             stack.pop();
             let got = stack
-                .get::<usize>(
-                    stack
-                        .len()
-                        .checked_sub(conv)
-                        .ok_or(ExecError::InvalidPick)?,
-                )
+                .get::<usize>(stack.len() - conv)
                 .ok_or(ExecError::InvalidPick)?;
 
             stack.push(*got);
 
             Ok(ExecRes::Executed)
         }
-        (_, Token::Pick) => Err(ExecError::MissingArguments),
+        (
+            _,
+            Token::Swap
+            | Token::Print
+            | Token::Drop
+            | Token::Rot
+            | Token::If
+            | Token::Pick
+            | Token::Skip,
+        ) => Err(ExecError::MissingArguments),
         (_, Token::Semicolon) => unreachable!(),
         (_, Token::Colon) => unreachable!(),
     }
