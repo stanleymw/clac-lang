@@ -285,7 +285,7 @@ fn main() -> Result<(), ExecError> {
                     }),
                 ),
                 (
-                    "readNative",
+                    "read_native",
                     Native(|stack| {
                         let addr = stack.pop().expect("Stack empty on readNative");
                         let val = (unsafe { *(addr as *const Value) }) as Value;
@@ -295,12 +295,13 @@ fn main() -> Result<(), ExecError> {
                 (
                     "write8",
                     Native(|stack| {
-                        let addr = stack.pop().expect("Stack empty on write");
                         let value: u8 = stack
                             .pop()
                             .expect("Stack empty on write")
                             .try_into()
                             .expect("trying to write8 on a value that doesn't fit in a byte");
+                        let addr = stack.pop().expect("Stack empty on write");
+
                         let ptr = addr as *mut u8;
                         unsafe {
                             *ptr = value;
@@ -308,10 +309,11 @@ fn main() -> Result<(), ExecError> {
                     }),
                 ),
                 (
-                    "writeNative",
+                    "write_native",
                     Native(|stack| {
-                        let addr = stack.pop().expect("Stack empty on write");
                         let value: Value = stack.pop().expect("Stack empty on write");
+                        let addr = stack.pop().expect("Stack empty on write");
+
                         let ptr = addr as *mut Value;
                         unsafe {
                             *ptr = value;
@@ -323,7 +325,7 @@ fn main() -> Result<(), ExecError> {
                     Native(|stack| {
                         let res = unsafe {
                             match stack[..] {
-                                [.., v6, v5, v4, v3, v2, v1, rax] => {
+                                [.., rax, v1, v2, v3, v4, v5, v6] => {
                                     syscall(rax, v1, v2, v3, v4, v5, v6)
                                 }
                                 _ => panic!("syscall: Expected 6 arguments"),
@@ -335,6 +337,28 @@ fn main() -> Result<(), ExecError> {
                         }
 
                         stack.push(res);
+                    }),
+                ),
+                (
+                    "drop_range",
+                    Native(|stack| {
+                        let amount: usize = stack
+                            .pop()
+                            .expect("Stack empty on dropRange")
+                            .try_into()
+                            .expect("Drop amount must be nonnegative");
+                        let start: usize = stack
+                            .pop()
+                            .expect("Stack empty on dropRange")
+                            .try_into()
+                            .expect("Drop start must be nonnegative");
+
+                        let start = stack
+                            .len()
+                            .checked_sub(start)
+                            .expect("Drop range start out of bounds");
+
+                        stack.drain(start..(start + amount));
                     }),
                 ),
             ]

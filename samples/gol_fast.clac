@@ -1,0 +1,196 @@
+: comment Compiled using Eoghan's flap to clac compiler https://github.com/Eoghanmc22/flap-compiler ;
+
+: comment flap source code:
+    // Conways Game of Life
+    
+    const int DIMENSION = 7;
+    const int LEN = DIMENSION * DIMENSION;
+    const int SEED_HIGH = 0b0000000000000000100;
+    const int SEED_LOW = 0b000011000010100000000000000000;
+    
+    // Convets a logical position into a bit index
+    int get_cell_index(int x, int y) {
+      x + DIMENSION * y
+    }
+    
+    // Returns the status of a cell
+    // Returns 1 if the cell at index x, y is alive
+    // Returns 0 otherwise
+    int get_cell_state(int data_high, int data_low, int x, int y) {
+      int index = get_cell_index(x, y);
+    
+      if (index >= 30) {
+        int index = index - 30;
+        (data_high >> index) & 1
+      } else {
+        (data_low >> index) & 1
+      }
+    }
+    
+    // Wrapping offset of logical positions
+    // Adds `by` to `pos` mod `DIMENSION`
+    int offset(int pos, int by) {
+      if (by >= 0) {
+        (pos + by) % DIMENSION
+      } else {
+        (pos + DIMENSION + by) % DIMENSION
+      }
+    }
+    
+    // Bit index to logical x position
+    int idx_to_x(int idx) {
+      idx % DIMENSION
+    }
+    
+    // Bit index to logical y position
+    int idx_to_y(int idx) {
+      idx / DIMENSION
+    }
+    
+    // Calculates the next state of a cell using the rules of Conways Game of Life
+    int update_cell(int data_high, int data_low, int x, int y) {
+      int neighbors = 
+              get_cell_state(data_high, data_low, offset(x, -1), offset(y, -1))
+              + get_cell_state(data_high, data_low, offset(x, 0), offset(y, -1))
+              + get_cell_state(data_high, data_low, offset(x, 1), offset(y, -1))
+              + get_cell_state(data_high, data_low, offset(x, -1), offset(y, 0))
+              + get_cell_state(data_high, data_low, offset(x, 1), offset(y, 0))
+              + get_cell_state(data_high, data_low, offset(x, -1), offset(y, 1))
+              + get_cell_state(data_high, data_low, offset(x, 0), offset(y, 1))
+              + get_cell_state(data_high, data_low, offset(x, 1), offset(y, 1));
+    
+      int is_alive = get_cell_state(data_high, data_low, x, y);
+    
+      if (neighbors < 2) {
+        0
+      } else if (neighbors == 2) {
+        is_alive
+      } else if (neighbors == 3) {
+        1
+      } else {
+        0
+      }
+    }
+    
+    // Compute the next low order bits of the game state
+    int compute_next_data_low(int last_data_high, int last_data_low) {
+      int compute_next_data_low(int last_data_high, int last_data_low, int next_data_low, int idx) {
+        if (idx < 30) {
+          int x = idx_to_x(idx);
+          int y = idx_to_y(idx);
+    
+          int next_data_low = next_data_low + (update_cell(last_data_high, last_data_low, x, y) << idx);
+    
+          compute_next_data_low(last_data_high, last_data_low, next_data_low, idx + 1)
+        } else {
+          next_data_low
+        }
+      }
+    
+      compute_next_data_low(last_data_high, last_data_low, 0, 0)
+    }
+    
+    // Compute the next high order bits of the game state
+    int compute_next_data_high(int last_data_high, int last_data_low) {
+      int compute_next_data_high(int last_data_high, int last_data_low, int next_data_high, int idx) {
+        if (idx + 30 < LEN) {
+          int x = idx_to_x(idx + 30);
+          int y = idx_to_y(idx + 30);
+    
+          int next_data_high = next_data_high + (update_cell(last_data_high, last_data_low, x, y) << idx);
+    
+          compute_next_data_high(last_data_high, last_data_low, next_data_high, idx + 1)
+        } else {
+          next_data_high
+        }
+      }
+    
+      compute_next_data_high(last_data_high, last_data_low, 0, 0)
+    }
+    
+    // Compute the integer used to print a game row in a somewhat human readable way
+    int make_decimal_row(int data_high, int data_low, int y) {
+      int make_decimal_row(int data_high, int data_low, int x, int y, int row) {
+        if (x < DIMENSION) {
+          // int row = row + (1 + 7 * get_cell_state(data_high, data_low, x, y)) * (10 ** x);
+          int row = row + (8 - 7 * get_cell_state(data_high, data_low, x, y)) * (10 ** x);
+        
+          make_decimal_row(data_high, data_low, x + 1, y, row)
+        } else {
+          row
+        }
+      }
+    
+      make_decimal_row(data_high, data_low, 0, y, 0)
+    }
+    
+    // Print the whole game state
+    void print_game(int data_high, int data_low) {
+      void print_game(int data_high, int data_low, int y) {
+        if (y < DIMENSION) {
+          int row = make_decimal_row(data_high, data_low, y);
+    
+          print(row);
+        
+          print_game(data_high, data_low, y + 1);
+        }
+      }
+    
+      print_game(data_high, data_low, 0)
+    }
+    
+    // The recursive game loop
+    void game_loop(int data_high, int data_low) {
+      print_game(data_high, data_low);
+    
+      // Emulate new lines
+      print(0);
+      print(0);
+      print(0);
+    
+      int next_data_low = compute_next_data_low(data_high, data_low);
+      int next_data_high = compute_next_data_high(data_high, data_low);
+    
+      // Recursion goes brrrr
+      game_loop(next_data_high, next_data_low)
+    }
+    
+    game_loop(SEED_HIGH, SEED_LOW);
+;
+
+: comment Start Definitions ;
+: func-get_cell_index-0 7 2 pick * 3 pick 2 pick + 1 pick 5 4 drop_range ;
+: func-on_true-12 1 pick 30 - 4 pick 2 pick 2 swap ** / 1 pick 0 2 pick 2 % 1 pick * + 1 pick 8 7 drop_range ;
+: func-on_false-19 2 pick 2 pick 2 swap ** / 1 pick 0 2 pick 2 % 1 pick * + 1 pick 7 6 drop_range ;
+: func-get_cell_state-5 2 pick 2 pick func-get_cell_index-0 1 pick 30 < 1 swap - 6 pick 6 pick 4 pick 4 pick if func-on_true-12 1 skip func-on_false-19 7 6 drop_range ;
+: func-on_true-30 1 pick 3 pick + 1 pick 7 % 1 pick 5 4 drop_range ;
+: func-on_false-35 1 pick 7 + 1 pick 4 pick + 1 pick 7 % 1 pick 6 5 drop_range ;
+: func-offset-26 1 pick 0 < 1 swap - 2 pick 4 pick 3 pick if func-on_true-30 1 skip func-on_false-35 4 3 drop_range ;
+: func-idx_to_x-42 1 pick 7 % 1 pick 3 2 drop_range ;
+: func-idx_to_y-45 1 pick 7 / 1 pick 3 2 drop_range ;
+: func-on_true-86 0 3 2 drop_range ;
+: func-on_true-93 2 pick 3 2 drop_range ;
+: func-on_true-100 1 3 2 drop_range ;
+: func-on_false-103 0 3 2 drop_range ;
+: func-on_false-96 1 pick 3 - if 0 1 skip 1 3 pick 3 pick 3 pick if func-on_true-100 1 skip func-on_false-103 4 3 drop_range ;
+: func-on_false-89 1 pick 2 - if 0 1 skip 1 3 pick 3 pick 3 pick if func-on_true-93 1 skip func-on_false-96 4 3 drop_range ;
+: func-update_cell-48 2 pick -1 func-offset-26 2 pick -1 func-offset-26 6 pick 6 pick 4 pick 4 pick func-get_cell_state-5 5 pick 0 func-offset-26 5 pick -1 func-offset-26 9 pick 9 pick 4 pick 4 pick func-get_cell_state-5 4 pick 2 pick + 9 pick 1 func-offset-26 9 pick -1 func-offset-26 13 pick 13 pick 4 pick 4 pick func-get_cell_state-5 4 pick 2 pick + 13 pick -1 func-offset-26 13 pick 0 func-offset-26 17 pick 17 pick 4 pick 4 pick func-get_cell_state-5 4 pick 2 pick + 17 pick 1 func-offset-26 17 pick 0 func-offset-26 21 pick 21 pick 4 pick 4 pick func-get_cell_state-5 4 pick 2 pick + 21 pick -1 func-offset-26 21 pick 1 func-offset-26 25 pick 25 pick 4 pick 4 pick func-get_cell_state-5 4 pick 2 pick + 25 pick 0 func-offset-26 25 pick 1 func-offset-26 29 pick 29 pick 4 pick 4 pick func-get_cell_state-5 4 pick 2 pick + 29 pick 1 func-offset-26 29 pick 1 func-offset-26 33 pick 33 pick 4 pick 4 pick func-get_cell_state-5 4 pick 2 pick + 35 pick 35 pick 35 pick 35 pick func-get_cell_state-5 2 pick 2 < 2 pick 4 pick 3 pick if func-on_true-86 1 skip func-on_false-89 38 37 drop_range ;
+: func-on_true-118 4 pick func-idx_to_x-42 5 pick func-idx_to_y-45 5 pick 5 pick 4 pick 4 pick func-update_cell-48 1 pick 8 pick 2 swap ** * 5 pick 2 pick + 9 pick 1 + 9 pick 9 pick 4 pick 4 pick func-compute_next_data_low-112 11 10 drop_range ;
+: func-on_false-130 1 pick 5 4 drop_range ;
+: func-compute_next_data_low-112 1 pick 30 < 2 pick 6 pick 6 pick 6 pick 5 pick if func-on_true-118 1 skip func-on_false-130 6 5 drop_range ;
+: func-compute_next_data_low-109 2 pick 2 pick 0 0 func-compute_next_data_low-112 3 2 drop_range ;
+: func-on_true-147 4 pick 30 + 1 pick func-idx_to_x-42 6 pick 30 + 1 pick func-idx_to_y-45 7 pick 7 pick 5 pick 4 pick func-update_cell-48 1 pick 10 pick 2 swap ** * 7 pick 2 pick + 11 pick 1 + 11 pick 11 pick 4 pick 4 pick func-compute_next_data_high-140 13 12 drop_range ;
+: func-on_false-161 1 pick 5 4 drop_range ;
+: func-compute_next_data_high-140 1 pick 30 + 1 pick 49 < 3 pick 7 pick 7 pick 7 pick 5 pick if func-on_true-147 1 skip func-on_false-161 7 6 drop_range ;
+: func-compute_next_data_high-137 2 pick 2 pick 0 0 func-compute_next_data_high-140 3 2 drop_range ;
+: func-on_true-179 5 pick 5 pick 4 pick 4 pick func-get_cell_state-5 7 2 pick * 8 2 pick - 10 6 pick ** 2 pick 2 pick * 8 pick 2 pick + 8 pick 1 + 12 pick 12 pick 3 pick 11 pick 6 pick func-make_decimal_row-172 13 12 drop_range ;
+: func-on_false-193 3 pick 6 5 drop_range ;
+: func-make_decimal_row-172 3 pick 7 < 6 pick 6 pick 4 pick 7 pick 7 pick 6 pick if func-on_true-179 1 skip func-on_false-193 7 6 drop_range ;
+: func-make_decimal_row-168 3 pick 3 pick 0 4 pick 0 func-make_decimal_row-172 4 3 drop_range ;
+: func-on_true-209 3 pick 3 pick 3 pick func-make_decimal_row-168 1 pick print 2 pick 1 + 5 pick 5 pick 3 pick func-print_game-204 5 5 drop_range ;
+: func-print_game-204 1 pick 7 < 4 pick 4 pick 4 pick 4 pick if func-on_true-209 3 skip drop drop drop 4 4 drop_range ;
+: func-print_game-201 2 pick 2 pick 0 func-print_game-204 drop drop ;
+: func-game_loop-220 2 pick 2 pick func-print_game-201 0 print 0 print 0 print 2 pick 2 pick func-compute_next_data_low-109 3 pick 3 pick func-compute_next_data_high-137 1 pick 3 pick 6 4 drop_range func-game_loop-220 ;
+
+: comment Start Main ;
+4 50987008 func-game_loop-220
