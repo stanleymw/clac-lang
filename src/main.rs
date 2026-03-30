@@ -126,17 +126,31 @@ fn execute_line_nontop<'cs>(
     mut callstack: CallStack<'cs>,
 ) -> Result<LineRes, ExecError> {
     while let Some(line) = callstack.pop() {
+        // println!("cs = {callstack:?}");
         let Some((token, xs)) = line.split_first() else {
             continue;
         };
 
+        let mut optimize_push = |vals: &[Token]| match vals {
+            [] => {}
+            [Token::Literal(n), Token::Skip, rest @ ..]
+                if (*n >= 1 && ((*n as usize) == rest.len())) => {}
+            _ => {
+                callstack.push(xs);
+            }
+        };
+
         match execute(funcs, stack, token)? {
             ExecRes::Executed => {
-                callstack.push(xs);
+                if !xs.is_empty() {
+                    callstack.push(xs);
+                }
             }
             ExecRes::Skip(n) => match xs.split_at_checked(n) {
                 Some((_, remain)) => {
-                    callstack.push(remain);
+                    if !remain.is_empty() {
+                        callstack.push(remain);
+                    }
                 }
                 None => return Err(ExecError::InvalidSkip),
             },
@@ -144,8 +158,8 @@ fn execute_line_nontop<'cs>(
                 return Ok(LineRes::Quit);
             }
             ExecRes::RecursiveCall(newfunc) => {
-                // TODO: remove this for tailcall optimization
-                callstack.push(xs);
+                // TODO: tailcall optimization
+                optimize_push(xs);
 
                 callstack.push(newfunc);
             }
@@ -206,7 +220,7 @@ fn repl(state: &mut ClacState) -> Result<(), ExecError> {
     println!("clac++ by stanleymw");
 
     loop {
-        print!("clac++ > ");
+        print!("clac++> ");
         io::stdout().flush().unwrap();
 
         let mut buf = String::new();
