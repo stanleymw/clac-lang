@@ -179,10 +179,10 @@ fn resolve_funcmap(funcs: &mut FuncMap) {
     for function in &mut funcs.functions {
         if let Function::Clac(f) = function {
             for token in f {
-                if let Token::Function(FunctionRef::Unresolved(name)) = token {
-                    if let Some(resolved) = funcs.map.get(name) {
-                        *token = Token::Function(FunctionRef::Resolved(*resolved));
-                    }
+                if let Token::Function(FunctionRef::Unresolved(name)) = token
+                    && let Some(resolved) = funcs.map.get(name)
+                {
+                    *token = Token::Function(FunctionRef::Resolved(*resolved));
                 }
             }
         }
@@ -197,7 +197,7 @@ fn execute_line_toplevel(
     let mut cur_func: Option<(&String, Code)> = None;
 
     loop {
-        (line, cur_func) = match (&line[..], cur_func) {
+        (line, cur_func) = match (line, cur_func) {
             (
                 [
                     Token::Colon,
