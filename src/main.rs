@@ -256,7 +256,12 @@ fn exec_str(buf: &str, state: &mut ClacState) -> Result<(), ExecError> {
 }
 
 fn repl(state: &mut ClacState, hide_stack: bool) -> Result<(), ExecError> {
-    println!("clac++ by stanleymw ({})", env!("VERGEN_GIT_DESCRIBE"),);
+    println!(
+        "clac++ by stanleymw ({} @ {} on {})",
+        env!("VERGEN_GIT_DESCRIBE"),
+        env!("VERGEN_GIT_COMMIT_TIMESTAMP"),
+        env!("VERGEN_GIT_BRANCH"),
+    );
 
     loop {
         print!("clac++> ");
