@@ -5,6 +5,8 @@ edition = "2024"
 exclude = [
     "samples/",
 ]
+license = "GPL-3.0-or-later"
+description = "Reference implementation of Clac++, a simple stack-based postfix (reverse polish notation) calculator/programming language."
 
 [dependencies]
 ahash = "0.8.12"
