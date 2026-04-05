@@ -1,4 +1,4 @@
-use clac_rs::types::*;
+use clac_lang::types::*;
 use clap::Parser;
 use std::io::{self, Read, Write};
 
