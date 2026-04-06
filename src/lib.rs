@@ -18,7 +18,7 @@ fn resolve_funcmap(funcs: &mut FuncMap) {
     }
 }
 
-fn parse(token: &str) -> Token {
+fn parse<'a>(token: &str) -> Token<'a> {
     use Token::*;
 
     match token {
@@ -39,17 +39,17 @@ fn parse(token: &str) -> Token {
         // "syscall" => Syscall,
         id => match id.parse() {
             Ok(num) => Literal(num),
-            Err(_) => FunctionCall(FunctionRef::Unresolved(id.to_string())),
+            Err(_) => FunctionCall(FunctionRef::Unresolved(id.to_string().into())),
         },
     }
 }
 
-impl ClacState {
-    fn execute<'cs>(
-        functions: &'cs FuncMap,
+impl<'cs> ClacState<'cs> {
+    fn execute<'fm>(
+        functions: &'fm FuncMap,
         stack: &mut ClacStack,
         token: &Token,
-    ) -> Result<ExecRes<'cs>, ExecError> {
+    ) -> Result<ExecRes<'fm>, ExecError> {
         match (stack.as_mut_slice(), token) {
             (_, Token::Literal(n)) => {
                 stack.push(*n);
@@ -142,10 +142,10 @@ impl ClacState {
     }
 
     // we have to split execute_line and this version, due to lifetime problems. When you call clac functions, it will be executing in this context, where the FunctionMap CANNOT be modified, since you cannot define functions within a function.
-    fn execute_line_nontop<'cs>(
-        funcs: &'cs FuncMap,
+    fn execute_line_nontop<'fm>(
+        funcs: &'fm FuncMap,
         stack: &mut ClacStack,
-        mut callstack: CallStack<'cs>,
+        mut callstack: CallStack<'fm>,
     ) -> Result<(), ExecError> {
         while let Some(line) = callstack.pop() {
             // println!("cs = {callstack:?}");
@@ -189,8 +189,8 @@ impl ClacState {
     }
 
     /// Execute a slice of [`Token`]s representing a line of Clac++ code.
-    pub fn execute_tokens(&mut self, mut line: &[Token]) -> Result<(), ExecError> {
-        let mut cur_func: Option<(&String, Code)> = None;
+    pub fn execute_tokens<'l>(&mut self, mut line: &'l [Token<'cs>]) -> Result<(), ExecError> {
+        let mut cur_func: Option<(FuncName<'cs>, Code)> = None;
 
         let funcs = &mut self.funcmap;
         let stack = &mut self.stack;
@@ -204,18 +204,18 @@ impl ClacState {
                         rem @ ..,
                     ],
                     None,
-                ) => (rem, Some((name, Vec::new()))),
+                ) => (rem, Some((name.clone(), Vec::new()))),
                 ([Token::Semicolon, rem @ ..], Some((name, f))) => {
                     let len = funcs.functions.len();
 
                     // if we are re-defining a function, we should replace
-                    match funcs.map.get(name) {
+                    match funcs.map.get(&name) {
                         Some(idx) => {
                             funcs.functions[*idx] = Function::Clac(f);
                         }
                         None => {
                             funcs.functions.push(Function::Clac(f));
-                            funcs.map.insert(name.to_string(), len);
+                            funcs.map.insert(name, len);
                         }
                     };
 
@@ -249,25 +249,27 @@ impl ClacState {
     }
 
     /// Execute a line of Clac++ code in a string.
-    pub fn execute_str(&mut self, line: &str) -> Result<(), ExecError> {
-        let parsed: Vec<Token> = line.split_whitespace().map(parse).collect();
+    pub fn execute_str<'l>(&mut self, line: &'l str) -> Result<(), ExecError> {
+        let parsed: Vec<Token<'cs>> = line.split_whitespace().map(parse).collect();
 
         self.execute_tokens(&parsed)
     }
 }
 
-fn name_func_pair_to_funcmap<const N: usize>(xs: [(&str, Function); N]) -> FuncMap {
+fn name_func_pair_to_funcmap<'names, const N: usize>(
+    xs: [(&'names str, Function<'names>); N],
+) -> FuncMap<'names> {
     FuncMap {
         map: ahash::AHashMap::from_iter(
             xs.iter()
                 .enumerate()
-                .map(|(i, (name, _))| (name.to_string(), i)),
+                .map(|(i, (name, _))| ((*name).into(), i)),
         ),
         functions: Vec::from_iter(xs.into_iter().map(|(_, func)| func)),
     }
 }
 
-impl Default for ClacState {
+impl Default for ClacState<'_> {
     fn default() -> Self {
         ClacState {
             stack: Vec::new(),

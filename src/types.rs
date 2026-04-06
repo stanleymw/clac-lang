@@ -1,19 +1,23 @@
+use std::borrow::Cow;
+
 pub type Value = i64;
 pub type ClacStack = Vec<Value>;
 
 type FunctionIndex = usize;
 
+pub type FuncName<'a> = Cow<'a, str>;
+
 #[derive(Debug, Clone)]
-pub enum FunctionRef {
+pub enum FunctionRef<'a> {
     Resolved(FunctionIndex),
-    Unresolved(String),
+    Unresolved(FuncName<'a>),
 }
 
 #[derive(Debug, Clone)]
-pub enum Token {
+pub enum Token<'func_str> {
     // data
     Literal(Value),
-    FunctionCall(FunctionRef),
+    FunctionCall(FunctionRef<'func_str>),
 
     // side effects
     Quit,
@@ -37,11 +41,11 @@ pub enum Token {
     Semicolon,
 }
 
-pub type Code = Vec<Token>;
+pub type Code<'func_str> = Vec<Token<'func_str>>;
 
 #[derive(Debug)]
-pub enum Function {
-    Clac(Code),
+pub enum Function<'func_str> {
+    Clac(Code<'func_str>),
 
     Native(fn(&mut ClacStack)),
 
@@ -49,25 +53,26 @@ pub enum Function {
 }
 
 // pub type FuncMap = ahash::AHashMap<String, FunctionIndex>;
-pub type CallStack<'a> = Vec<&'a [Token]>;
+pub type CallStack<'a> = Vec<&'a [Token<'a>]>;
 
 #[derive(Debug)]
-pub struct FuncMap {
-    pub map: ahash::AHashMap<String, FunctionIndex>,
-    pub functions: Vec<Function>,
+pub struct FuncMap<'func_str> {
+    // TODO: this doesn't need to be owned
+    pub map: ahash::AHashMap<FuncName<'func_str>, FunctionIndex>,
+    pub functions: Vec<Function<'func_str>>,
 }
 
 #[derive(Debug)]
 /// The primary struct representing the state of the Clac++ machine.
-pub struct ClacState {
+pub struct ClacState<'func_str> {
     pub stack: ClacStack,
-    pub funcmap: FuncMap,
+    pub funcmap: FuncMap<'func_str>,
 }
 
 pub enum ExecRes<'a> {
     Executed,
     Skip(usize),
-    RecursiveCall(&'a [Token]),
+    RecursiveCall(&'a [Token<'a>]),
 }
 
 #[derive(Debug)]
