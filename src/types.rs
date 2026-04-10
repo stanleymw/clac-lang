@@ -6,9 +6,18 @@ pub type ClacStack = Vec<Value>;
 type FunctionIndex = usize;
 
 #[derive(Debug, Clone)]
-pub enum FunctionRef {
+pub(crate) enum InternalFunctionRef {
     Resolved(FunctionIndex),
     Unresolved(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionRef(pub(crate) InternalFunctionRef);
+
+impl FunctionRef {
+    pub fn new(function_name: String) -> Self {
+        Self(InternalFunctionRef::Unresolved(function_name))
+    }
 }
 
 #[derive(Debug, Clone)]

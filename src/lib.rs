@@ -9,10 +9,12 @@ fn resolve_funcmap(funcs: &mut FuncMap) {
     for function in &mut funcs.functions {
         if let Function::Clac(f) = function {
             for token in f {
-                if let Token::FunctionCall(FunctionRef::Unresolved(name)) = token
+                if let Token::FunctionCall(FunctionRef(InternalFunctionRef::Unresolved(name))) =
+                    token
                     && let Some(resolved) = funcs.map.get(name)
                 {
-                    *token = Token::FunctionCall(FunctionRef::Resolved(*resolved));
+                    *token =
+                        Token::FunctionCall(FunctionRef(InternalFunctionRef::Resolved(*resolved)));
                 }
             }
         }
@@ -40,7 +42,7 @@ fn parse(token: &str) -> Token {
         // "syscall" => Syscall,
         id => match id.parse() {
             Ok(num) => Literal(num),
-            Err(_) => FunctionCall(FunctionRef::Unresolved(id.to_string())),
+            Err(_) => FunctionCall(FunctionRef::new(id.to_string())),
         },
     }
 }
@@ -57,10 +59,10 @@ impl ClacState {
                 Ok(ExecRes::Executed)
             }
             (_, Token::Quit) => Err(ExecError::Quit),
-            (_, Token::FunctionCall(state)) => {
+            (_, Token::FunctionCall(FunctionRef(state))) => {
                 let f = match state {
-                    FunctionRef::Resolved(x) => &functions.functions[*x],
-                    FunctionRef::Unresolved(name) => match functions.map.get(name) {
+                    InternalFunctionRef::Resolved(x) => &functions.functions[*x],
+                    InternalFunctionRef::Unresolved(name) => match functions.map.get(name) {
                         Some(x) => &functions.functions[*x], // NOTE: we SHOULD be executing top level, because otherwise this token should have already been resolved.
                         None => return Err(ExecError::UnknownFunction(name.to_string())),
                     },
@@ -201,7 +203,7 @@ impl ClacState {
                 (
                     [
                         Token::Colon,
-                        Token::FunctionCall(FunctionRef::Unresolved(name)),
+                        Token::FunctionCall(FunctionRef(InternalFunctionRef::Unresolved(name))),
                         rem @ ..,
                     ],
                     None,
