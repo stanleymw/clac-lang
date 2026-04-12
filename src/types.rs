@@ -1,8 +1,17 @@
+use std::process::exit;
+
+use cranelift::{
+    codegen::Context,
+    prelude::{AbiParam, FunctionBuilderContext, Signature, types::I64},
+};
+use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::{FuncId, Module};
 use thiserror::Error;
 
 use crate::builtins;
 
 pub type Value = i64;
+
 pub(crate) type ValueStack = Vec<Value>;
 
 type FunctionIndex = usize;
@@ -128,16 +137,99 @@ fn name_func_pair_to_funcmap<const N: usize>(xs: [(&str, Function); N]) -> FuncM
     }
 }
 
-#[derive(Debug)]
+pub(crate) struct Imports {
+    pub(crate) pushfunc: FuncId,
+    pub(crate) popfunc: FuncId,
+}
+
+pub(crate) struct JITState {
+    pub(crate) module: JITModule,
+    pub(crate) ctx: Context,
+    pub(crate) fbctx: FunctionBuilderContext,
+
+    pub(crate) imports: Imports,
+}
+
 /// The primary struct representing the state of the Clac++ machine.
 pub struct ClacState {
+    // JIT Stuff
+    pub(crate) jit: JITState,
+
+    // Clac Stuff
     pub(crate) stack: ValueStack,
     pub(crate) funcmap: FuncMap,
 }
 
+extern "C" fn rpush(stack: *mut ValueStack, val: i64) {
+    match unsafe { stack.as_mut() } {
+        None => exit(67),
+        Some(v) => {
+            v.push(val);
+        }
+    }
+}
+
+extern "C" fn rpop(stack: *mut ValueStack) -> Value {
+    match unsafe { stack.as_mut() } {
+        None => exit(68),
+        Some(v) => match v.pop() {
+            None => exit(69),
+            Some(n) => n,
+        },
+    }
+}
+
 impl Default for ClacState {
     fn default() -> Self {
+        let mut builder = JITBuilder::with_flags(
+            &[("opt_level", "speed")],
+            cranelift_module::default_libcall_names(),
+        )
+        .unwrap();
+
+        builder.symbol("__rpush__", rpush as *const u8);
+        builder.symbol("__rpop__", rpop as *const u8);
+
+        let mut module = cranelift_jit::JITModule::new(builder);
+
+        let ptr = module.isa().pointer_type();
+
+        let pushfunc = module
+            .declare_function(
+                "__rpush__",
+                cranelift_module::Linkage::Import,
+                &Signature {
+                    params: vec![AbiParam::new(ptr), AbiParam::new(I64)],
+                    returns: vec![],
+                    call_conv: module.isa().default_call_conv(),
+                },
+            )
+            .unwrap();
+
+        let popfunc = module
+            .declare_function(
+                "__rpop__",
+                cranelift_module::Linkage::Import,
+                &Signature {
+                    params: vec![AbiParam::new(ptr)],
+                    returns: vec![AbiParam::new(I64)],
+                    call_conv: module.isa().default_call_conv(),
+                },
+            )
+            .unwrap();
+
+        let ctx = module.make_context();
+
         ClacState {
+            jit: JITState {
+                module,
+                ctx,
+                fbctx: FunctionBuilderContext::new(),
+                imports: Imports {
+                    pushfunc: pushfunc,
+                    popfunc: popfunc,
+                },
+            },
             stack: Vec::new(),
             funcmap: name_func_pair_to_funcmap(builtins::FUNCTIONS),
         }
@@ -146,10 +238,10 @@ impl Default for ClacState {
 
 impl ClacState {
     pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            stack: Vec::with_capacity(capacity),
-            funcmap: name_func_pair_to_funcmap(builtins::FUNCTIONS),
-        }
+        let mut ret = Self::default();
+        ret.stack.reserve(capacity);
+
+        ret
     }
 }
 

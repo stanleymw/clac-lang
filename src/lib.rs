@@ -1,4 +1,5 @@
 mod builtins;
+mod jit;
 pub mod types;
 
 use std::hint::unreachable_unchecked;
@@ -197,8 +198,8 @@ impl ClacState {
     pub fn execute_tokens(&mut self, mut line: &[Token]) -> Result<(), ExecError> {
         let mut cur_func: Option<(&String, Code)> = None;
 
-        let funcs = &mut self.funcmap;
-        let stack = &mut self.stack;
+        let mut funcs = &mut self.funcmap;
+        let mut stack = &mut self.stack;
 
         loop {
             (line, cur_func) = match (line, cur_func) {
@@ -207,6 +208,13 @@ impl ClacState {
                 }
                 ([Token::Semicolon, rem @ ..], Some((name, f))) => {
                     let len = funcs.functions.len();
+
+                    // let compiled = self.compile_function(name, &f).unwrap();
+
+                    // funcs = &mut self.funcmap;
+                    // stack = &mut self.stack;
+
+                    // compiled(stack);
 
                     // if we are re-defining a function, we should replace
                     match funcs.map.get(name) {
