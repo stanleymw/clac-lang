@@ -52,13 +52,15 @@ impl ClacState {
         stack: &mut ValueStack,
         token: &Instr,
     ) -> Result<ExecRes<'cs>, ExecError> {
-        match (stack.as_mut_slice(), token) {
-            (_, Instr::Literal(n)) => {
+        let mut xpop = || stack.pop().ok_or(ExecError::MissingArguments);
+
+        match token {
+            Instr::Literal(n) => {
                 stack.push(*n);
                 Ok(ExecRes::Executed)
             }
-            (_, Instr::Quit) => Err(ExecError::Quit),
-            (_, Instr::FunctionCall(state)) => {
+            Instr::Quit => Err(ExecError::Quit),
+            Instr::FunctionCall(state) => {
                 let f = match state {
                     FuncRef::Resolved(x) => &functions.functions[*x],
                     FuncRef::Unresolved(name) => match functions.map.get(name) {
@@ -74,8 +76,8 @@ impl ClacState {
                         Ok(ExecRes::Executed)
                     }
                     Function::ClacOp(f) => {
-                        let y = stack.pop().ok_or(ExecError::MissingArguments)?;
-                        let x = stack.pop().ok_or(ExecError::MissingArguments)?;
+                        let y = xpop()?;
+                        let x = xpop()?;
 
                         stack.push(f(x, y));
                         Ok(ExecRes::Executed)
@@ -86,78 +88,69 @@ impl ClacState {
                 }
             }
 
-            ([.., x], Instr::Print) => {
-                println!("{x}");
-                stack.pop();
+            Instr::Print => {
+                println!("{}", xpop()?);
                 Ok(ExecRes::Executed)
             }
-            ([.., _], Instr::Drop) => {
-                stack.pop().expect("unreachable");
+            Instr::Drop => {
+                xpop()?;
                 Ok(ExecRes::Executed)
             }
-            ([.., x, y], Instr::Swap) => {
-                std::mem::swap(x, y);
+            Instr::Swap => {
+                let [.., a, b] = stack.as_mut_slice() else {
+                    return Err(ExecError::MissingArguments);
+                };
+
+                std::mem::swap(a, b);
                 Ok(ExecRes::Executed)
             }
-            ([.., x, y, z], Instr::Rot) => {
+            Instr::Rot => {
+                let [.., x, y, z] = stack.as_mut_slice() else {
+                    return Err(ExecError::MissingArguments);
+                };
                 (*x, *y, *z) = (*y, *z, *x);
                 Ok(ExecRes::Executed)
             }
-            ([.., 0], Instr::If) => {
-                stack.pop().unwrap();
+            Instr::If => match xpop()? {
+                0 => Ok(ExecRes::Skip(3)),
+                _ => Ok(ExecRes::Executed),
+            },
+            Instr::Skip => Ok(ExecRes::Skip(
+                xpop()?.try_into().map_err(|_| ExecError::InvalidSkip)?,
+            )),
+            Instr::Add => {
+                let b = xpop()?;
+                let a = xpop()?;
+                stack.push(a + b);
+                Ok(ExecRes::Executed)
+            }
+            Instr::Sub => {
+                let b = xpop()?;
+                let a = xpop()?;
+                stack.push(a - b);
+                Ok(ExecRes::Executed)
+            }
 
-                Ok(ExecRes::Skip(3))
-            }
-            ([.., _], Instr::If) => {
-                stack.pop().unwrap();
-
+            Instr::Mul => {
+                let b = xpop()?;
+                let a = xpop()?;
+                stack.push(a * b);
                 Ok(ExecRes::Executed)
             }
-            ([.., n], Instr::Skip) => {
-                let n = *n;
-                stack.pop();
-                Ok(ExecRes::Skip(
-                    n.try_into().map_err(|_| ExecError::InvalidSkip)?,
-                ))
-            }
-            ([.., a, b], Instr::Add) => {
-                let res = *a + *b;
-                stack.pop().unwrap();
-                stack.pop().unwrap();
-                stack.push(res);
+            Instr::Div => {
+                let b = xpop()?;
+                let a = xpop()?;
+                stack.push(a / b);
                 Ok(ExecRes::Executed)
             }
-            ([.., a, b], Instr::Sub) => {
-                let res = *a - *b;
-                stack.pop().unwrap();
-                stack.pop().unwrap();
-                stack.push(res);
+            Instr::Rem => {
+                let b = xpop()?;
+                let a = xpop()?;
+                stack.push(a % b);
                 Ok(ExecRes::Executed)
             }
-            ([.., a, b], Instr::Mul) => {
-                let res = *a * *b;
-                stack.pop().unwrap();
-                stack.pop().unwrap();
-                stack.push(res);
-                Ok(ExecRes::Executed)
-            }
-            ([.., a, b], Instr::Div) => {
-                let res = *a / *b;
-                stack.pop().unwrap();
-                stack.pop().unwrap();
-                stack.push(res);
-                Ok(ExecRes::Executed)
-            }
-            ([.., a, b], Instr::Rem) => {
-                let res = *a % *b;
-                stack.pop().unwrap();
-                stack.pop().unwrap();
-                stack.push(res);
-                Ok(ExecRes::Executed)
-            }
-            ([.., n], Instr::Pick) if (*n > 0) => {
-                let conv: usize = (*n).try_into().unwrap();
-                stack.pop();
+            Instr::Pick => {
+                let conv: usize = xpop()?.try_into().map_err(|_| ExecError::InvalidPick)?;
                 let got = stack
                     .get::<usize>(stack.len() - conv)
                     .ok_or(ExecError::InvalidPick)?;
@@ -166,21 +159,6 @@ impl ClacState {
 
                 Ok(ExecRes::Executed)
             }
-            (
-                _,
-                Instr::Swap
-                | Instr::Print
-                | Instr::Drop
-                | Instr::Rot
-                | Instr::If
-                | Instr::Pick
-                | Instr::Skip
-                | Instr::Add
-                | Instr::Sub
-                | Instr::Mul
-                | Instr::Div
-                | Instr::Rem,
-            ) => Err(ExecError::MissingArguments),
         }
     }
 
