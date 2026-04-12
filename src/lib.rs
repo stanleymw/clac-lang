@@ -224,12 +224,35 @@ impl ClacState {
         bu.switch_to_block(b0);
         bu.seal_block(b0);
 
-        let a = bu.ins().iconst(I64, 60);
-        let b = bu.ins().iconst(I64, 7);
+        let mut vals = Vec::new();
 
-        let add = bu.ins().iadd(a, b);
+        for tok in line {
+            match tok {
+                Token::Literal(n) => {
+                    vals.push(bu.ins().iconst(I64, *n));
+                }
+                Token::FunctionCall(FunctionRef(InternalFunctionRef::Unresolved(n))) => {
+                    let b = vals.pop().unwrap();
+                    let a = vals.pop().unwrap();
+                    match &**n {
+                        "+" => vals.push(bu.ins().iadd(a, b)),
+                        "-" => vals.push(bu.ins().isub(a, b)),
+                        "*" => vals.push(bu.ins().imul(a, b)),
+                        "/" => vals.push(bu.ins().sdiv(a, b)),
+                        "%" => vals.push(bu.ins().srem(a, b)),
+                        _ => panic!(),
+                    }
+                }
+                _ => unimplemented!(),
+            }
+        }
 
-        let _ret = bu.ins().return_(&[add]);
+        // let a = bu.ins().iconst(I64, 60);
+        // let b = bu.ins().iconst(I64, 7);
+
+        // let add = bu.ins().iadd(a, b);
+
+        let _ret = bu.ins().return_(&[vals.pop().unwrap()]);
 
         // bu.seal_all_blocks(); // FIXME: this should be done
         bu.finalize();
