@@ -1,5 +1,13 @@
 mod builtins;
 pub mod types;
+use std::mem::transmute;
+
+use cranelift::prelude::{
+    AbiParam, Configurable, FunctionBuilder, FunctionBuilderContext, InstBuilder, Signature,
+    settings, types::I64,
+};
+use cranelift_jit::JITBuilder;
+use cranelift_module::Module;
 use rustyline::error::ReadlineError;
 use thiserror::Error;
 use types::*;
@@ -191,6 +199,60 @@ impl ClacState {
         Ok(())
     }
 
+    pub fn execute_tokens_2(&mut self, mut line: &[Token]) -> Result<(), ExecError> {
+        let builder = JITBuilder::with_flags(
+            &[("opt_level", "speed")],
+            cranelift_module::default_libcall_names(),
+        )
+        .unwrap();
+
+        let mut module = cranelift_jit::JITModule::new(builder);
+
+        let mut ctx = module.make_context();
+        let mut fbctx = FunctionBuilderContext::new();
+
+        ctx.func.signature = Signature {
+            params: vec![],
+            returns: vec![AbiParam::new(I64)], //FIXME: mismatch on purpose to test cranelift
+            call_conv: cranelift::prelude::isa::CallConv::SystemV,
+        };
+
+        let mut bu = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+
+        let b0 = bu.create_block();
+
+        bu.switch_to_block(b0);
+        bu.seal_block(b0);
+
+        let a = bu.ins().iconst(I64, 60);
+        let b = bu.ins().iconst(I64, 7);
+
+        let add = bu.ins().iadd(a, b);
+
+        let _ret = bu.ins().return_(&[add]);
+
+        // bu.seal_all_blocks(); // FIXME: this should be done
+        bu.finalize();
+        println!("{}", ctx.func.display());
+
+        let dec = module
+            .declare_anonymous_function(&ctx.func.signature)
+            .unwrap();
+        module.define_function(dec, &mut ctx).unwrap();
+
+        // println!("finalize = {:?}", module.finalize_definitions());
+        module.finalize_definitions().unwrap();
+
+        let fun = module.get_finalized_function(dec);
+
+        let casted: fn() -> i64 = unsafe { transmute(fun) };
+
+        println!("fn = {casted:?}");
+        println!("result = {}", casted());
+
+        Ok(())
+    }
+
     /// Execute a slice of [`Token`]s representing a line of Clac++ code.
     pub fn execute_tokens(&mut self, mut line: &[Token]) -> Result<(), ExecError> {
         let mut cur_func: Option<(&String, Code)> = None;
@@ -255,7 +317,7 @@ impl ClacState {
     pub fn execute_str(&mut self, line: &str) -> Result<(), ExecError> {
         let parsed: Vec<Token> = line.split_whitespace().map(parse).collect();
 
-        self.execute_tokens(&parsed)
+        self.execute_tokens_2(&parsed)
     }
 }
 
