@@ -126,6 +126,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "memmap2 0.9.10",
  "rustyline",
  "thiserror",
 ]
@@ -329,7 +330,7 @@ dependencies = [
  "cranelift-native",
  "libc",
  "log",
- "memmap2",
+ "memmap2 0.2.3",
  "region",
  "target-lexicon",
  "wasmtime-internal-jit-icache-coherence",
@@ -508,6 +509,15 @@ name = "memmap2"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "723e3ebdcdc5c023db1df315364573789f8857c11b631a2fdfad7c00f5c046b4"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "memmap2"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
 dependencies = [
  "libc",
 ]

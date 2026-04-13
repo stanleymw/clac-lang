@@ -1,4 +1,6 @@
-use std::process::exit;
+use core::{fmt, slice};
+use std::fmt::Debug;
+use std::{io, process::exit};
 
 use cranelift::{
     codegen::Context,
@@ -11,6 +13,7 @@ use thiserror::Error;
 use crate::builtins;
 
 pub type Value = i64;
+pub const CRANELIFT_VALUE: cranelift::prelude::Type = I64;
 
 pub(crate) type ValueStack = Vec<Value>;
 
@@ -138,8 +141,8 @@ fn name_func_pair_to_funcmap<const N: usize>(xs: [(&str, Function); N]) -> FuncM
 }
 
 pub(crate) struct Imports {
-    pub(crate) pushfunc: FuncId,
-    pub(crate) popfunc: FuncId,
+    pub(crate) printfunc: FuncId,
+    pub(crate) quitfunc: FuncId,
 }
 
 pub(crate) struct JITState {
@@ -156,7 +159,7 @@ pub struct ClacState {
     pub(crate) jit: JITState,
 
     // Clac Stuff
-    pub(crate) stack: ValueStack,
+    pub(crate) stack: Stack,
     pub(crate) funcmap: FuncMap,
 }
 
@@ -179,40 +182,90 @@ extern "C" fn rpop(stack: *mut ValueStack) -> Value {
     }
 }
 
-impl Default for ClacState {
-    fn default() -> Self {
+extern "C" fn quit() {
+    exit(0);
+}
+
+extern "C" fn print_value(val: Value) {
+    println!("{}", val)
+}
+
+struct Stack {
+    data: memmap2::MmapMut,
+    rsp: *mut Value,
+    // TODO: check if compiler optimizes out get head pointer
+}
+
+impl Debug for Stack {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let head = self.data.as_ptr() as *const Value;
+        let len = unsafe {
+            self.rsp
+                .offset_from_unsigned(self.data.as_ptr() as *const Value)
+        };
+
+        <[Value] as Debug>::fmt(unsafe { slice::from_raw_parts(head, len) }, fmt)
+    }
+}
+
+impl Stack {
+    fn new(capacity: usize) -> io::Result<Self> {
+        let mut alloced = memmap2::MmapMut::map_anon(capacity)?;
+        Ok(Self {
+            rsp: alloced.as_mut_ptr() as *mut Value,
+            data: alloced,
+        })
+    }
+
+    fn push(&mut self, val: Value) {
+        unsafe {
+            *self.rsp = val;
+        }
+        self.rsp = self.rsp.wrapping_offset(1);
+    }
+
+    fn pop(&mut self) -> Option<Value> {
+        if self.rsp == self.data.as_mut_ptr() as *mut Value {
+            None
+        } else {
+            self.rsp = self.rsp.wrapping_offset(-1);
+            Some(unsafe { *self.rsp })
+        }
+    }
+}
+
+impl ClacState {
+    fn new(capacity: usize) -> Self {
         let mut builder = JITBuilder::with_flags(
             &[("opt_level", "speed")],
             cranelift_module::default_libcall_names(),
         )
         .unwrap();
 
-        builder.symbol("__rpush__", rpush as *const u8);
-        builder.symbol("__rpop__", rpop as *const u8);
+        builder.symbol("__rprint__", print_value as *const u8);
+        builder.symbol("__rquit__", quit as *const u8);
 
         let mut module = cranelift_jit::JITModule::new(builder);
 
-        let ptr = module.isa().pointer_type();
-
-        let pushfunc = module
+        let printfunc = module
             .declare_function(
-                "__rpush__",
+                "__rprint__",
                 cranelift_module::Linkage::Import,
                 &Signature {
-                    params: vec![AbiParam::new(ptr), AbiParam::new(I64)],
+                    params: vec![AbiParam::new(CRANELIFT_VALUE)],
                     returns: vec![],
                     call_conv: module.isa().default_call_conv(),
                 },
             )
             .unwrap();
 
-        let popfunc = module
+        let quitfunc = module
             .declare_function(
-                "__rpop__",
+                "__rquit__",
                 cranelift_module::Linkage::Import,
                 &Signature {
-                    params: vec![AbiParam::new(ptr)],
-                    returns: vec![AbiParam::new(I64)],
+                    params: vec![],
+                    returns: vec![],
                     call_conv: module.isa().default_call_conv(),
                 },
             )
@@ -226,22 +279,13 @@ impl Default for ClacState {
                 ctx,
                 fbctx: FunctionBuilderContext::new(),
                 imports: Imports {
-                    pushfunc: pushfunc,
-                    popfunc: popfunc,
+                    printfunc: printfunc,
+                    quitfunc: quitfunc,
                 },
             },
-            stack: Vec::new(),
+            stack: Stack::new(capacity)?,
             funcmap: name_func_pair_to_funcmap(builtins::FUNCTIONS),
         }
-    }
-}
-
-impl ClacState {
-    pub fn with_capacity(capacity: usize) -> Self {
-        let mut ret = Self::default();
-        ret.stack.reserve(capacity);
-
-        ret
     }
 }
 
