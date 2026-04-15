@@ -3,8 +3,6 @@ mod jit;
 mod jit_builtins;
 pub mod types;
 
-use std::hint::unreachable_unchecked;
-
 use rustyline::error::ReadlineError;
 use thiserror::Error;
 use types::*;
@@ -45,7 +43,7 @@ fn parse(token: &str) -> Token {
         // "syscall" => Syscall,
         id => match id.parse() {
             Ok(num) => Literal(num),
-            Err(_) => FunctionCall(id.to_string()),
+            Err(_) => Identifier(id.to_string()),
         },
     }
 }
@@ -86,8 +84,8 @@ impl ClacState {
                         stack.push(f(x, y));
                         Ok(ExecRes::Executed)
                     }
-                    Function::ClacInstr(_) => unreachable!(
-                        "Tried to execute a ClacInstr as a function call, which should be impossible if this instruction was obtained from a token by token_to_instruction"
+                    Function::ArithInstr(_) => unreachable!(
+                        "Tried to execute an ArithInstr as a function call, which should be impossible if this instruction was obtained from a token by token_to_instruction"
                     ),
                     Function::Compiled(f) => {
                         let new_rsp = unsafe { f(stack.rsp) };
@@ -132,16 +130,22 @@ impl ClacState {
             Instr::Skip => Ok(ExecRes::Skip(
                 xpop()?.try_into().map_err(|_| ExecError::InvalidSkip)?,
             )),
-            it @ (Instr::Add | Instr::Sub | Instr::Mul | Instr::Div | Instr::Rem) => {
+            Instr::Arith(it) => {
                 let b = xpop()?;
                 let a = xpop()?;
                 stack.push(match it {
-                    Instr::Add => a + b,
-                    Instr::Sub => a - b,
-                    Instr::Mul => a * b,
-                    Instr::Div => a / b,
-                    Instr::Rem => a % b,
-                    _ => unsafe { unreachable_unchecked() }, // TODO: prove,
+                    Arith::Add => a + b,
+                    Arith::Sub => a - b,
+                    Arith::Mul => a * b,
+                    Arith::Div => a / b,
+                    Arith::Rem => a % b,
+                    Arith::Lt => {
+                        if a < b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                 });
                 Ok(ExecRes::Executed)
             }
@@ -215,7 +219,7 @@ impl ClacState {
 
         loop {
             (line, cur_func) = match (line, cur_func) {
-                ([Token::Colon, Token::FunctionCall(name), rem @ ..], None) => {
+                ([Token::Colon, Token::Identifier(name), rem @ ..], None) => {
                     (rem, Some((name, Vec::new())))
                 }
                 ([Token::Semicolon, rem @ ..], Some((name, f))) => {
@@ -226,7 +230,6 @@ impl ClacState {
                     funcs = &mut self.funcmap;
                     stack = &mut self.stack;
 
-                    println!("Compiled = {compiled:?}");
                     // unsafe { std::arch::asm!("int3") };
 
                     // if we are re-defining a function, we should replace

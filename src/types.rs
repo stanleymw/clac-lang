@@ -1,6 +1,6 @@
 use core::{fmt, slice};
 use std::fmt::Debug;
-use std::{io, process::exit};
+use std::io;
 
 use cranelift::{
     codegen::Context,
@@ -26,6 +26,16 @@ pub(crate) enum FuncRef {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum Arith {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Lt,
+}
+
+#[derive(Debug)]
 // Internal clac instruction
 pub(crate) enum Instr {
     // data
@@ -41,13 +51,9 @@ pub(crate) enum Instr {
     Swap,
     Rot,
 
-    // Math Instructions
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
+    Arith(Arith),
 
+    // Math Instructions
     If,
     Pick,
     Skip,
@@ -58,7 +64,7 @@ pub(crate) enum Instr {
 pub enum Token {
     // data
     Literal(Value),
-    FunctionCall(String),
+    Identifier(String),
 
     // side effects
     Quit,
@@ -83,9 +89,9 @@ impl Token {
     pub(crate) fn token_to_instruction(self, functions: &FuncMap) -> Instr {
         match self {
             Token::Literal(n) => Instr::Literal(n),
-            Token::FunctionCall(name) => match functions.map.get(&name) {
+            Token::Identifier(name) => match functions.map.get(&name) {
                 Some(idx) => match &functions.functions[*idx] {
-                    Function::ClacInstr(inst) => inst.clone(),
+                    Function::ArithInstr(inst) => Instr::Arith(inst.clone()),
                     _ => Instr::FunctionCall(FuncRef::Resolved(*idx)),
                 },
                 None => Instr::FunctionCall(FuncRef::Unresolved(name)),
@@ -119,7 +125,7 @@ pub(crate) enum Function {
     Native(fn(&mut Stack)),
     Compiled(JITFunction),
 
-    ClacInstr(Instr),
+    ArithInstr(Arith),
 
     ClacOp(fn(Value, Value) -> Value),
 }
@@ -161,7 +167,7 @@ pub(crate) struct JITState {
 /// The primary struct representing the state of the Clac++ machine.
 pub struct ClacState {
     // JIT Stuff
-    pub(crate) jit: JITState,
+    pub(crate) jit: JITState, // TODO: make JIT optional
 
     // Clac Stuff
     pub(crate) stack: Stack,

@@ -1,8 +1,9 @@
 use std::ffi::c_long;
 
 use crate::types::{
+    Arith,
     Function::{self, *},
-    Instr, Value,
+    Value,
 };
 
 unsafe extern "C" {
@@ -10,11 +11,12 @@ unsafe extern "C" {
 }
 
 pub const FUNCTIONS: [(&str, Function); 14] = [
-    ("+", ClacInstr(Instr::Add)),
-    ("-", ClacInstr(Instr::Sub)),
-    ("*", ClacInstr(Instr::Mul)),
-    ("/", ClacInstr(Instr::Div)),
-    ("%", ClacInstr(Instr::Rem)),
+    ("+", ArithInstr(Arith::Add)),
+    ("-", ArithInstr(Arith::Sub)),
+    ("*", ArithInstr(Arith::Mul)),
+    ("/", ArithInstr(Arith::Div)),
+    ("%", ArithInstr(Arith::Rem)),
+    ("<", ArithInstr(Arith::Lt)),
     (
         "**",
         ClacOp(|x, y| match y.try_into() {
@@ -22,7 +24,6 @@ pub const FUNCTIONS: [(&str, Function); 14] = [
             Err(err) => panic!("Pow error: {}", err),
         }),
     ),
-    ("<", ClacOp(|x, y| if x < y { 1 } else { 0 })),
     (
         "read8",
         Native(|stack| {

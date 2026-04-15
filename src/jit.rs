@@ -1,13 +1,13 @@
 use std::mem::transmute_copy;
 
-use crate::types::{self, CRANELIFT_VALUE};
+use crate::types::{self, Arith, CRANELIFT_VALUE};
 use cranelift::prelude::{
-    AbiParam, FunctionBuilder, InstBuilder, MemFlags, Signature, Value, Variable, types::I64,
+    AbiParam, FunctionBuilder, InstBuilder, IntCC, MemFlags, Signature, Value, Variable, types::I64,
 };
 
 use types::Value as ClacValue;
 
-use cranelift_module::{Linkage, Module, ModuleError};
+use cranelift_module::{Module, ModuleError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -136,17 +136,17 @@ impl types::ClacState {
                     let out = bu.ins().iconst(I64, *n);
                     tmp.push(out);
                 }
-                it @ (Instr::Add | Instr::Sub | Instr::Mul | Instr::Div | Instr::Rem) => {
+                Instr::Arith(it) => {
                     let b = xpop(&mut tmp, &mut bu);
                     let a = xpop(&mut tmp, &mut bu);
 
                     tmp.push(match it {
-                        Instr::Add => bu.ins().iadd(a, b),
-                        Instr::Sub => bu.ins().isub(a, b),
-                        Instr::Mul => bu.ins().imul(a, b),
-                        Instr::Div => bu.ins().sdiv(a, b),
-                        Instr::Rem => bu.ins().srem(a, b),
-                        _ => unreachable!(),
+                        Arith::Add => bu.ins().iadd(a, b),
+                        Arith::Sub => bu.ins().isub(a, b),
+                        Arith::Mul => bu.ins().imul(a, b),
+                        Arith::Div => bu.ins().sdiv(a, b),
+                        Arith::Rem => bu.ins().srem(a, b),
+                        Arith::Lt => bu.ins().icmp(IntCC::SignedLessThan, a, b),
                     });
                 }
                 Instr::Swap => {
