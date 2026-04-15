@@ -10,7 +10,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Module};
 use thiserror::Error;
 
-use crate::builtins;
+use crate::{builtins, jit_builtins};
 
 pub type Value = i64;
 pub const CRANELIFT_VALUE: cranelift::prelude::Type = I64;
@@ -146,6 +146,8 @@ fn name_func_pair_to_funcmap<const N: usize>(xs: [(&str, Function); N]) -> FuncM
 pub(crate) struct Imports {
     pub(crate) printfunc: FuncId,
     pub(crate) quitfunc: FuncId,
+
+    pub(crate) errorfunc: FuncId,
 }
 
 pub(crate) struct JITState {
@@ -184,14 +186,6 @@ pub struct ClacState {
 //         },
 //     }
 // }
-
-extern "C" fn quit() {
-    exit(0);
-}
-
-extern "C" fn print_value(val: Value) {
-    println!("{}", val)
-}
 
 pub(crate) struct Stack {
     data: memmap2::MmapMut,
@@ -248,17 +242,28 @@ pub enum InitError {
 impl ClacState {
     pub fn new(capacity: usize) -> Result<Self, InitError> {
         let mut builder = JITBuilder::with_flags(
-            &[("opt_level", "speed")],
+            &[("opt_level", "speed"), ("enable_alias_analysis", "true")],
             cranelift_module::default_libcall_names(),
         )?;
 
-        builder.symbol("__rprint__", print_value as *const u8);
-        builder.symbol("__rquit__", quit as *const u8);
+        builder.symbol("__rprint__", jit_builtins::print_value as *const u8);
+        builder.symbol("__rquit__", jit_builtins::quit as *const u8);
+        builder.symbol("__rerr__", jit_builtins::error as *const u8);
 
         let mut module = cranelift_jit::JITModule::new(builder);
 
         let printfunc = module.declare_function(
             "__rprint__",
+            cranelift_module::Linkage::Import,
+            &Signature {
+                params: vec![AbiParam::new(CRANELIFT_VALUE)],
+                returns: vec![],
+                call_conv: module.isa().default_call_conv(),
+            },
+        )?;
+
+        let errorfunc = module.declare_function(
+            "__rerror__",
             cranelift_module::Linkage::Import,
             &Signature {
                 params: vec![AbiParam::new(CRANELIFT_VALUE)],
@@ -287,6 +292,7 @@ impl ClacState {
                 imports: Imports {
                     printfunc: printfunc,
                     quitfunc: quitfunc,
+                    errorfunc: errorfunc,
                 },
             },
             stack: Stack::new(capacity)?,

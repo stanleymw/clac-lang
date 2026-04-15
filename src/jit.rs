@@ -16,23 +16,38 @@ pub(crate) enum CompilerError {
     ModuleError(#[from] ModuleError),
 }
 
+const CLAC_VALUE_STRIDE: i64 = size_of::<ClacValue>() as i64;
+const ALIGNED: MemFlags = MemFlags::new().with_aligned();
+
 fn emit_push(bu: &mut FunctionBuilder, stack: Variable, val: Value) {
     let pos = bu.use_var(stack);
 
-    bu.ins().store(MemFlags::new().with_aligned(), val, pos, 0);
+    bu.ins().store(ALIGNED, val, pos, 0);
 
-    let new_pos = bu.ins().iadd_imm(pos, size_of::<ClacValue>() as i64);
+    let new_pos = bu.ins().iadd_imm(pos, CLAC_VALUE_STRIDE);
     bu.def_var(stack, new_pos);
 }
 
 fn emit_pop(bu: &mut FunctionBuilder, stack: Variable) -> Value {
     let pos = bu.use_var(stack);
-    let new_pos = bu.ins().iadd_imm(pos, -(size_of::<ClacValue>() as i64));
+    let new_pos = bu.ins().iadd_imm(pos, -CLAC_VALUE_STRIDE);
     bu.def_var(stack, new_pos);
 
-    bu.ins()
-        .load(CRANELIFT_VALUE, MemFlags::new().with_aligned(), new_pos, 0)
+    bu.ins().load(CRANELIFT_VALUE, ALIGNED, new_pos, 0)
 }
+
+fn emit_pick(bu: &mut FunctionBuilder, stack: Variable, offset: Value) {
+    let rsp = bu.use_var(stack);
+
+    // let offset_minus_1 = bu.ins().isub(offset, bu.ins().iconst(CRANELIFT_VALUE, 1));
+
+    // let negative = bu.ins().icmp_imm(Cond, x, Y)
+    let offset_multiplied = bu.ins().imul_imm(offset, CLAC_VALUE_STRIDE);
+    let target_pos = bu.ins().isub(rsp, offset_multiplied);
+    let loaded = bu.ins().load(CRANELIFT_VALUE, ALIGNED, target_pos, 0);
+    emit_push(bu, stack, loaded);
+}
+
 impl types::ClacState {
     pub(crate) fn compile_function(
         &mut self,
@@ -46,6 +61,7 @@ impl types::ClacState {
                 types::Imports {
                     printfunc,
                     quitfunc,
+                    errorfunc,
                 },
         } = &mut self.jit;
 
@@ -62,6 +78,7 @@ impl types::ClacState {
 
         let printfunc = module.declare_func_in_func(*printfunc, &mut ctx.func);
         let quitfunc = module.declare_func_in_func(*quitfunc, &mut ctx.func);
+        let errorfunc = module.declare_func_in_func(*errorfunc, &mut ctx.func);
 
         let mut bu = FunctionBuilder::new(&mut ctx.func, fbctx);
 
@@ -103,6 +120,13 @@ impl types::ClacState {
 
         let xpop = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
             tmp.pop().unwrap_or_else(|| emit_pop(bu, stack))
+        };
+
+        let xpick = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
+            let popped = xpop(tmp, bu);
+            flush(tmp, bu);
+
+            emit_pick(bu, stack, popped);
         };
 
         for inst in line {
@@ -151,6 +175,7 @@ impl types::ClacState {
                 Instr::Quit => {
                     bu.ins().call(quitfunc, &[]);
                 }
+                Instr::Pick => xpick(&mut tmp, &mut bu),
                 _ => todo!(),
             }
         }

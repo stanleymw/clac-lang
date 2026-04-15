@@ -1,5 +1,6 @@
 mod builtins;
 mod jit;
+mod jit_builtins;
 pub mod types;
 
 use std::hint::unreachable_unchecked;
