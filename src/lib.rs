@@ -1,8 +1,7 @@
 mod builtins;
 mod jit;
+mod jit_builtins;
 pub mod types;
-
-use std::hint::unreachable_unchecked;
 
 use rustyline::error::ReadlineError;
 use thiserror::Error;
@@ -11,7 +10,7 @@ use types::*;
 // resolve functions so we don't need to do a costly hashmap lookup
 fn resolve_funcmap(funcs: &mut FuncMap) {
     for function in &mut funcs.functions {
-        if let Function::Clac(f) = function {
+        if let Function::User(_, f) = function {
             for token in f {
                 if let Instr::FunctionCall(FuncRef::Unresolved(name)) = token
                     && let Some(resolved) = funcs.map.get(name)
@@ -44,7 +43,7 @@ fn parse(token: &str) -> Token {
         // "syscall" => Syscall,
         id => match id.parse() {
             Ok(num) => Literal(num),
-            Err(_) => FunctionCall(id.to_string()),
+            Err(_) => Identifier(id.to_string()),
         },
     }
 }
@@ -52,7 +51,8 @@ fn parse(token: &str) -> Token {
 impl ClacState {
     fn execute<'cs>(
         functions: &'cs FuncMap,
-        stack: &mut ValueStack,
+        stack: &mut Stack,
+        jit: &JITState,
         token: &Instr,
     ) -> Result<ExecRes<'cs>, ExecError> {
         let mut xpop = || stack.pop().ok_or(ExecError::MissingArguments);
@@ -73,21 +73,24 @@ impl ClacState {
                 };
 
                 match f {
-                    Function::Clac(f) => Ok(ExecRes::RecursiveCall(f)),
                     Function::Native(f) => {
                         f(stack);
                         Ok(ExecRes::Executed)
                     }
-                    Function::ClacOp(f) => {
-                        let y = xpop()?;
-                        let x = xpop()?;
-
-                        stack.push(f(x, y));
-                        Ok(ExecRes::Executed)
-                    }
-                    Function::ClacInstr(_) => unreachable!(
-                        "Tried to execute a ClacInstr as a function call, which should be impossible if this instruction was obtained from a token by token_to_instruction"
+                    Function::ArithInstr(_) => unreachable!(
+                        "Tried to execute an ArithInstr as a function call, which should be impossible if this instruction was obtained from a token by token_to_instruction"
                     ),
+                    Function::User(fid, code) => match fid {
+                        Some(compiled) => {
+                            let asm = jit.get_function(*compiled);
+
+                            let new_rsp = unsafe { asm(stack.rsp) };
+                            stack.rsp = new_rsp;
+
+                            Ok(ExecRes::Executed)
+                        }
+                        None => Ok(ExecRes::RecursiveCall(code)),
+                    },
                 }
             }
 
@@ -100,18 +103,22 @@ impl ClacState {
                 Ok(ExecRes::Executed)
             }
             Instr::Swap => {
-                let [.., a, b] = stack.as_mut_slice() else {
-                    return Err(ExecError::MissingArguments);
-                };
+                let b = xpop()?;
+                let a = xpop()?;
 
-                std::mem::swap(a, b);
+                stack.push(b);
+                stack.push(a);
+
                 Ok(ExecRes::Executed)
             }
             Instr::Rot => {
-                let [.., x, y, z] = stack.as_mut_slice() else {
-                    return Err(ExecError::MissingArguments);
-                };
-                (*x, *y, *z) = (*y, *z, *x);
+                let z = xpop()?;
+                let y = xpop()?;
+                let x = xpop()?;
+
+                stack.push(y);
+                stack.push(z);
+                stack.push(x);
                 Ok(ExecRes::Executed)
             }
             Instr::If => match xpop()? {
@@ -121,24 +128,32 @@ impl ClacState {
             Instr::Skip => Ok(ExecRes::Skip(
                 xpop()?.try_into().map_err(|_| ExecError::InvalidSkip)?,
             )),
-            it @ (Instr::Add | Instr::Sub | Instr::Mul | Instr::Div | Instr::Rem) => {
+            Instr::Arith(it) => {
                 let b = xpop()?;
                 let a = xpop()?;
                 stack.push(match it {
-                    Instr::Add => a + b,
-                    Instr::Sub => a - b,
-                    Instr::Mul => a * b,
-                    Instr::Div => a / b,
-                    Instr::Rem => a % b,
-                    _ => unsafe { unreachable_unchecked() }, // TODO: prove,
+                    Arith::Add => a + b,
+                    Arith::Sub => a - b,
+                    Arith::Mul => a * b,
+                    Arith::Div => a / b,
+                    Arith::Rem => a % b,
+                    Arith::Lt => {
+                        if a < b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    Arith::Pow => builtins::pow(a, b).ok_or(ExecError::InvalidExponent)?,
                 });
                 Ok(ExecRes::Executed)
             }
             Instr::Pick => {
                 let conv: usize = xpop()?.try_into().map_err(|_| ExecError::InvalidPick)?;
-                let got = stack
-                    .get::<usize>(stack.len() - conv)
-                    .ok_or(ExecError::InvalidPick)?;
+                // let got = stack
+                //     .get::<usize>(stack.len() - conv)
+                //     .ok_or(ExecError::InvalidPick)?;
+                let got: &mut Value = todo!();
 
                 stack.push(*got);
 
@@ -150,7 +165,8 @@ impl ClacState {
     // we have to split execute_line and this version, due to lifetime problems. When you call clac functions, it will be executing in this context, where the FunctionMap CANNOT be modified, since you cannot define functions within a function.
     fn exec_function<'cs>(
         funcs: &'cs FuncMap,
-        stack: &mut ValueStack,
+        stack: &mut Stack,
+        jit: &JITState,
         mut callstack: CallStack<'cs>,
     ) -> Result<(), ExecError> {
         while let Some(line) = callstack.pop() {
@@ -168,7 +184,7 @@ impl ClacState {
                 }
             };
 
-            match Self::execute(funcs, stack, token)? {
+            match Self::execute(funcs, stack, jit, token)? {
                 ExecRes::Executed => {
                     if !xs.is_empty() {
                         callstack.push(xs);
@@ -203,32 +219,34 @@ impl ClacState {
 
         loop {
             (line, cur_func) = match (line, cur_func) {
-                ([Token::Colon, Token::FunctionCall(name), rem @ ..], None) => {
+                ([Token::Colon, Token::Identifier(name), rem @ ..], None) => {
                     (rem, Some((name, Vec::new())))
                 }
                 ([Token::Semicolon, rem @ ..], Some((name, f))) => {
-                    let len = funcs.functions.len();
-
-                    // let compiled = self.compile_function(name, &f).unwrap();
-
-                    // funcs = &mut self.funcmap;
-                    // stack = &mut self.stack;
-
-                    // compiled(stack);
-
-                    // if we are re-defining a function, we should replace
                     match funcs.map.get(name) {
                         Some(idx) => {
-                            funcs.functions[*idx] = Function::Clac(f);
+                            // replace already defined function
+                            funcs.functions[*idx] = Function::User(None, f);
                         }
                         None => {
-                            funcs.functions.push(Function::Clac(f));
+                            // create new function
+                            let len = funcs.functions.len();
+                            funcs.functions.push(Function::User(None, f));
                             funcs.map.insert(name.to_string(), len);
                         }
                     };
 
-                    // resolve function names to indices
+                    // first, resolve function names to indices in FuncMap
                     resolve_funcmap(funcs);
+
+                    // Reset the JIT
+                    let old = std::mem::replace(&mut self.jit, JITState::new().unwrap());
+                    unsafe { old.module.free_memory() };
+
+                    self.declare_and_compile_all_functions().unwrap();
+
+                    funcs = &mut self.funcmap;
+                    stack = &mut self.stack;
 
                     (rem, None)
                 }
@@ -240,14 +258,19 @@ impl ClacState {
                     (rem, Some((nm, f)))
                 }
                 ([tok, rem @ ..], None) => {
-                    match Self::execute(funcs, stack, &tok.clone().token_to_instruction(funcs))? {
+                    match Self::execute(
+                        funcs,
+                        stack,
+                        &self.jit,
+                        &tok.clone().token_to_instruction(funcs),
+                    )? {
                         ExecRes::Executed => (rem, None),
                         ExecRes::Skip(n) => match rem.split_at_checked(n) {
                             Some((_, rem2)) => (rem2, None),
                             None => return Err(ExecError::InvalidSkip),
                         },
                         ExecRes::RecursiveCall(f) => {
-                            Self::exec_function(funcs, stack, vec![f])?;
+                            Self::exec_function(funcs, stack, &self.jit, vec![f])?;
                             (rem, None)
                         }
                     }
@@ -273,6 +296,9 @@ pub enum ReplError {
 
     #[error("Readline Error: {0}")]
     LineError(#[from] ReadlineError),
+
+    #[error("Init error: {0}")]
+    InitError(#[from] InitError),
 }
 
 /// Launch an interactive REPL on the provided ClacState.
@@ -283,9 +309,17 @@ pub fn repl(state: &mut ClacState, hide_stack: bool) -> Result<(), ReplError> {
 
     loop {
         let read = match editor.readline("clac++> ") {
-            Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => return Ok(()),
+            Err(ReadlineError::Eof) => return Ok(()),
+            Err(ReadlineError::Interrupted) => {
+                // TODO: remove
+                unsafe { std::arch::asm!("int3") };
+                continue;
+            }
             Err(e) => return Err(e.into()),
-            Ok(res) => res,
+            Ok(res) => {
+                editor.add_history_entry(&res)?;
+                res
+            }
         };
 
         match state.execute_str(&read) {

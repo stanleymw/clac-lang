@@ -1,28 +1,27 @@
 use std::ffi::c_long;
 
 use crate::types::{
+    Arith,
     Function::{self, *},
-    Instr, Value,
+    Value,
 };
 
 unsafe extern "C" {
     fn syscall(num: c_long, ...) -> c_long;
 }
 
+pub(crate) fn pow(x: Value, y: Value) -> Option<Value> {
+    Some(x.pow(y.try_into().ok()?))
+}
+
 pub const FUNCTIONS: [(&str, Function); 14] = [
-    ("+", ClacInstr(Instr::Add)),
-    ("-", ClacInstr(Instr::Sub)),
-    ("*", ClacInstr(Instr::Mul)),
-    ("/", ClacInstr(Instr::Div)),
-    ("%", ClacInstr(Instr::Rem)),
-    (
-        "**",
-        ClacOp(|x, y| match y.try_into() {
-            Ok(conv) => Value::pow(x, conv),
-            Err(err) => panic!("Pow error: {}", err),
-        }),
-    ),
-    ("<", ClacOp(|x, y| if x < y { 1 } else { 0 })),
+    ("+", ArithInstr(Arith::Add)),
+    ("-", ArithInstr(Arith::Sub)),
+    ("*", ArithInstr(Arith::Mul)),
+    ("/", ArithInstr(Arith::Div)),
+    ("%", ArithInstr(Arith::Rem)),
+    ("<", ArithInstr(Arith::Lt)),
+    ("**", ArithInstr(Arith::Pow)),
     (
         "read8",
         Native(|stack| {
@@ -70,18 +69,15 @@ pub const FUNCTIONS: [(&str, Function); 14] = [
     (
         "syscall",
         Native(|stack| {
-            let res = unsafe {
-                match stack[..] {
-                    [.., rax, v1, v2, v3, v4, v5, v6] => syscall(rax, v1, v2, v3, v4, v5, v6),
-                    _ => panic!("syscall: Expected 7 arguments"),
-                }
-            };
+            let v6 = stack.pop().unwrap();
+            let v5 = stack.pop().unwrap();
+            let v4 = stack.pop().unwrap();
+            let v3 = stack.pop().unwrap();
+            let v2 = stack.pop().unwrap();
+            let v1 = stack.pop().unwrap();
+            let rax = stack.pop().unwrap();
 
-            for _ in 0..7 {
-                stack.pop();
-            }
-
-            stack.push(res);
+            stack.push(unsafe { syscall(rax, v1, v2, v3, v4, v5, v6) });
         }),
     ),
     (
@@ -97,13 +93,13 @@ pub const FUNCTIONS: [(&str, Function); 14] = [
                 .expect("Stack empty on dropRange")
                 .try_into()
                 .expect("Drop start must be nonnegative");
+            todo!()
+            // let start = stack
+            //     .len()
+            //     .checked_sub(start)
+            //     .expect("Drop range start out of bounds");
 
-            let start = stack
-                .len()
-                .checked_sub(start)
-                .expect("Drop range start out of bounds");
-
-            stack.drain(start..(start + amount));
+            // stack.drain(start..(start + amount));
         }),
     ),
     (

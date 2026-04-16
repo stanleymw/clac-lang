@@ -1,4 +1,6 @@
-use std::process::exit;
+use core::{fmt, slice};
+use std::fmt::Debug;
+use std::io;
 
 use cranelift::{
     codegen::Context,
@@ -8,9 +10,10 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Module};
 use thiserror::Error;
 
-use crate::builtins;
+use crate::{builtins, jit_builtins};
 
 pub type Value = i64;
+pub const CRANELIFT_VALUE: cranelift::prelude::Type = I64;
 
 pub(crate) type ValueStack = Vec<Value>;
 
@@ -21,6 +24,20 @@ pub(crate) enum FuncRef {
     Resolved(FunctionIndex),
     Unresolved(String),
 }
+
+#[derive(Debug, Clone)]
+pub(crate) enum Arith {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Lt,
+    Pow,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Mem {}
 
 #[derive(Debug, Clone)]
 // Internal clac instruction
@@ -38,13 +55,10 @@ pub(crate) enum Instr {
     Swap,
     Rot,
 
-    // Math Instructions
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
+    Arith(Arith),
+    // Mem(Mem),
 
+    // Math Instructions
     If,
     Pick,
     Skip,
@@ -55,7 +69,7 @@ pub(crate) enum Instr {
 pub enum Token {
     // data
     Literal(Value),
-    FunctionCall(String),
+    Identifier(String),
 
     // side effects
     Quit,
@@ -80,9 +94,9 @@ impl Token {
     pub(crate) fn token_to_instruction(self, functions: &FuncMap) -> Instr {
         match self {
             Token::Literal(n) => Instr::Literal(n),
-            Token::FunctionCall(name) => match functions.map.get(&name) {
+            Token::Identifier(name) => match functions.map.get(&name) {
                 Some(idx) => match &functions.functions[*idx] {
-                    Function::ClacInstr(inst) => inst.clone(),
+                    Function::ArithInstr(inst) => Instr::Arith(inst.clone()),
                     _ => Instr::FunctionCall(FuncRef::Resolved(*idx)),
                 },
                 None => Instr::FunctionCall(FuncRef::Unresolved(name)),
@@ -107,15 +121,15 @@ pub(crate) type Code = Vec<Instr>;
 //     code: Code,
 // }
 
-#[derive(Debug)]
+pub(crate) type JITFunction = unsafe extern "C" fn(*mut Value) -> *mut Value;
+
+#[derive(Debug, Clone)]
 pub(crate) enum Function {
-    Clac(Code),
+    Native(fn(&mut Stack)),
 
-    Native(fn(&mut ValueStack)),
+    User(Option<FuncId>, Code),
 
-    ClacInstr(Instr),
-
-    ClacOp(fn(Value, Value) -> Value),
+    ArithInstr(Arith),
 }
 
 pub(crate) type CallStack<'a> = Vec<&'a [Instr]>;
@@ -137,9 +151,13 @@ fn name_func_pair_to_funcmap<const N: usize>(xs: [(&str, Function); N]) -> FuncM
     }
 }
 
+// TODO: make a macro to do this
 pub(crate) struct Imports {
-    pub(crate) pushfunc: FuncId,
-    pub(crate) popfunc: FuncId,
+    pub(crate) printfunc: FuncId,
+    pub(crate) quitfunc: FuncId,
+    pub(crate) powfunc: FuncId,
+
+    pub(crate) errorfunc: FuncId,
 }
 
 pub(crate) struct JITState {
@@ -153,95 +171,163 @@ pub(crate) struct JITState {
 /// The primary struct representing the state of the Clac++ machine.
 pub struct ClacState {
     // JIT Stuff
-    pub(crate) jit: JITState,
+    pub(crate) jit: JITState, // TODO: make JIT optional
 
     // Clac Stuff
-    pub(crate) stack: ValueStack,
+    pub(crate) stack: Stack,
     pub(crate) funcmap: FuncMap,
 }
 
-extern "C" fn rpush(stack: *mut ValueStack, val: i64) {
-    match unsafe { stack.as_mut() } {
-        None => exit(67),
-        Some(v) => {
-            v.push(val);
+// extern "C" fn rpush(stack: *mut ValueStack, val: i64) {
+//     match unsafe { stack.as_mut() } {
+//         None => exit(67),
+//         Some(v) => {
+//             v.push(val);
+//         }
+//     }
+// }
+
+// extern "C" fn rpop(stack: *mut ValueStack) -> Value {
+//     match unsafe { stack.as_mut() } {
+//         None => exit(68),
+//         Some(v) => match v.pop() {
+//             None => exit(69),
+//             Some(n) => n,
+//         },
+//     }
+// }
+
+pub(crate) struct Stack {
+    data: memmap2::MmapMut,
+    pub(crate) rsp: *mut Value,
+    // TODO: check if compiler optimizes out get head pointer
+}
+
+impl Debug for Stack {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let head = self.data.as_ptr() as *const Value;
+        let len = unsafe {
+            self.rsp
+                .offset_from_unsigned(self.data.as_ptr() as *const Value)
+        };
+
+        <[Value] as Debug>::fmt(unsafe { slice::from_raw_parts(head, len) }, fmt)
+    }
+}
+
+impl Stack {
+    fn new(capacity: usize) -> io::Result<Self> {
+        let mut alloced = memmap2::MmapMut::map_anon(capacity)?;
+        Ok(Self {
+            rsp: alloced.as_mut_ptr() as *mut Value,
+            data: alloced,
+        })
+    }
+
+    pub(crate) fn push(&mut self, val: Value) {
+        unsafe {
+            *self.rsp = val;
+        }
+        self.rsp = self.rsp.wrapping_offset(1);
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<Value> {
+        if self.rsp == self.data.as_mut_ptr() as *mut Value {
+            None
+        } else {
+            self.rsp = self.rsp.wrapping_offset(-1);
+            Some(unsafe { *self.rsp })
         }
     }
 }
 
-extern "C" fn rpop(stack: *mut ValueStack) -> Value {
-    match unsafe { stack.as_mut() } {
-        None => exit(68),
-        Some(v) => match v.pop() {
-            None => exit(69),
-            Some(n) => n,
-        },
-    }
+#[derive(Debug, Error)]
+pub enum InitError {
+    #[error("Module error: {0}")]
+    ModuleError(#[from] cranelift_module::ModuleError),
+    #[error("IO Error: {0}")]
+    IoError(#[from] io::Error),
 }
 
-impl Default for ClacState {
-    fn default() -> Self {
+impl JITState {
+    pub(crate) fn new() -> Result<Self, InitError> {
         let mut builder = JITBuilder::with_flags(
-            &[("opt_level", "speed")],
+            &[("opt_level", "speed"), ("enable_alias_analysis", "true")],
             cranelift_module::default_libcall_names(),
-        )
-        .unwrap();
+        )?;
 
-        builder.symbol("__rpush__", rpush as *const u8);
-        builder.symbol("__rpop__", rpop as *const u8);
+        builder.symbol("__rprint__", jit_builtins::print_value as *const u8);
+        builder.symbol("__rquit__", jit_builtins::quit as *const u8);
+        builder.symbol("__rerr__", jit_builtins::error as *const u8);
+        builder.symbol("__rpow__", jit_builtins::pow as *const u8);
 
         let mut module = cranelift_jit::JITModule::new(builder);
 
-        let ptr = module.isa().pointer_type();
+        let valparam = AbiParam::new(CRANELIFT_VALUE);
 
-        let pushfunc = module
-            .declare_function(
-                "__rpush__",
-                cranelift_module::Linkage::Import,
-                &Signature {
-                    params: vec![AbiParam::new(ptr), AbiParam::new(I64)],
-                    returns: vec![],
-                    call_conv: module.isa().default_call_conv(),
-                },
-            )
-            .unwrap();
+        let printfunc = module.declare_function(
+            "__rprint__",
+            cranelift_module::Linkage::Import,
+            &Signature {
+                params: vec![valparam],
+                returns: vec![],
+                call_conv: module.isa().default_call_conv(),
+            },
+        )?;
 
-        let popfunc = module
-            .declare_function(
-                "__rpop__",
-                cranelift_module::Linkage::Import,
-                &Signature {
-                    params: vec![AbiParam::new(ptr)],
-                    returns: vec![AbiParam::new(I64)],
-                    call_conv: module.isa().default_call_conv(),
-                },
-            )
-            .unwrap();
+        let errorfunc = module.declare_function(
+            "__rerror__",
+            cranelift_module::Linkage::Import,
+            &Signature {
+                params: vec![valparam],
+                returns: vec![],
+                call_conv: module.isa().default_call_conv(),
+            },
+        )?;
+
+        let quitfunc = module.declare_function(
+            "__rquit__",
+            cranelift_module::Linkage::Import,
+            &Signature {
+                params: vec![],
+                returns: vec![],
+                call_conv: module.isa().default_call_conv(),
+            },
+        )?;
+
+        let powfunc = module.declare_function(
+            "__rpow__",
+            cranelift_module::Linkage::Import,
+            &Signature {
+                params: vec![valparam, valparam],
+                returns: vec![valparam],
+                call_conv: module.isa().default_call_conv(),
+            },
+        )?;
 
         let ctx = module.make_context();
 
-        ClacState {
-            jit: JITState {
-                module,
-                ctx,
-                fbctx: FunctionBuilderContext::new(),
-                imports: Imports {
-                    pushfunc: pushfunc,
-                    popfunc: popfunc,
-                },
+        Ok(JITState {
+            module,
+            ctx,
+            fbctx: FunctionBuilderContext::new(),
+            imports: Imports {
+                printfunc: printfunc,
+                quitfunc: quitfunc,
+                errorfunc: errorfunc,
+                powfunc: powfunc,
             },
-            stack: Vec::new(),
-            funcmap: name_func_pair_to_funcmap(builtins::FUNCTIONS),
-        }
+        })
     }
 }
 
 impl ClacState {
-    pub fn with_capacity(capacity: usize) -> Self {
-        let mut ret = Self::default();
-        ret.stack.reserve(capacity);
-
-        ret
+    pub fn new(capacity: usize) -> Result<Self, InitError> {
+        Ok(ClacState {
+            jit: JITState::new()?,
+            stack: Stack::new(capacity)?,
+            funcmap: name_func_pair_to_funcmap(builtins::FUNCTIONS),
+        })
     }
 }
 
@@ -263,6 +349,8 @@ pub enum ExecError {
     InvalidPick,
     #[error("Bad function definition")]
     BadFunctionDefinition,
+    #[error("Invalid exponent, must have non-negative exponent")]
+    InvalidExponent,
     #[error("Quit")]
     Quit,
 }
