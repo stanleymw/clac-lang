@@ -256,7 +256,6 @@ fn compile_block(
                 return;
             }
             Instr::Skip => {
-                debug_assert!((&line[i + 1..]).len() == 0);
                 if i > 0
                     && let Some(Instr::Literal(n)) = line.get(i - 1)
                 {
@@ -269,10 +268,12 @@ fn compile_block(
                     let new: usize = real_i + conv + 1;
                     let target = blockmap.get(&new).unwrap().1;
 
+                    flush(&mut tmp, bu);
                     bu.ins().jump(target, &[]);
 
                     return;
                 } else {
+                    debug_assert!((&line[i + 1..]).len() == 0);
                     let mut switch = Switch::new();
 
                     let start = real_i + 1;
@@ -285,6 +286,7 @@ fn compile_block(
                     // FIXME: dont create duplicates
                     let abort = bu.create_block();
 
+                    flush(&mut tmp, bu);
                     switch.emit(bu, popped, abort);
 
                     bu.switch_to_block(abort);
@@ -304,11 +306,14 @@ fn compile_block(
         && let Some(next) = blockmap.get(&(head + line.len()))
     {
         println!("GOT NEXT = {:?}", next);
+
+        flush(&mut tmp, bu);
         bu.ins().jump(next.1, &[]);
     } else {
         // assert(FINAL BLOCK)
         debug_assert!(head + line.len() == total_len);
 
+        flush(&mut tmp, bu);
         let final_stack = bu.use_var(stack);
         bu.ins().return_(&[final_stack]);
     }

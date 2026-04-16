@@ -250,8 +250,8 @@ pub enum InitError {
     IoError(#[from] io::Error),
 }
 
-impl ClacState {
-    pub fn new(capacity: usize) -> Result<Self, InitError> {
+impl JITState {
+    fn new() -> Result<Self, InitError> {
         let mut builder = JITBuilder::with_flags(
             &[("opt_level", "speed"), ("enable_alias_analysis", "true")],
             cranelift_module::default_libcall_names(),
@@ -308,18 +308,24 @@ impl ClacState {
 
         let ctx = module.make_context();
 
-        Ok(ClacState {
-            jit: JITState {
-                module,
-                ctx,
-                fbctx: FunctionBuilderContext::new(),
-                imports: Imports {
-                    printfunc: printfunc,
-                    quitfunc: quitfunc,
-                    errorfunc: errorfunc,
-                    powfunc: powfunc,
-                },
+        Ok(JITState {
+            module,
+            ctx,
+            fbctx: FunctionBuilderContext::new(),
+            imports: Imports {
+                printfunc: printfunc,
+                quitfunc: quitfunc,
+                errorfunc: errorfunc,
+                powfunc: powfunc,
             },
+        })
+    }
+}
+
+impl ClacState {
+    pub fn new(capacity: usize) -> Result<Self, InitError> {
+        Ok(ClacState {
+            jit: JITState::new()?,
             stack: Stack::new(capacity)?,
             funcmap: name_func_pair_to_funcmap(builtins::FUNCTIONS),
         })
