@@ -252,7 +252,12 @@ pub enum InitError {
 impl JITState {
     pub(crate) fn new() -> Result<Self, InitError> {
         let mut builder = JITBuilder::with_flags(
-            &[("opt_level", "speed"), ("enable_alias_analysis", "true")],
+            &[
+                ("opt_level", "speed"),
+                ("enable_alias_analysis", "true"),
+                // TODO: remove this if we can do tailcalls without it
+                ("preserve_frame_pointers", "true"),
+            ],
             cranelift_module::default_libcall_names(),
         )?;
 

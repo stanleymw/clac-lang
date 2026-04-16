@@ -32,6 +32,14 @@ pub(crate) enum CompilerError {
 const CLAC_VALUE_STRIDE: i64 = size_of::<ClacValue>() as i64;
 const ALIGNED: MemFlags = MemFlags::new().with_aligned();
 
+fn emit_pop_loadless(bu: &mut FunctionBuilder, stack: Variable) -> Value {
+    let pos = bu.use_var(stack);
+    let new_pos = bu.ins().iadd_imm(pos, -CLAC_VALUE_STRIDE);
+    bu.def_var(stack, new_pos);
+
+    new_pos
+}
+
 fn emit_push(bu: &mut FunctionBuilder, stack: Variable, val: Value) {
     let pos = bu.use_var(stack);
 
@@ -42,9 +50,7 @@ fn emit_push(bu: &mut FunctionBuilder, stack: Variable, val: Value) {
 }
 
 fn emit_pop(bu: &mut FunctionBuilder, stack: Variable) -> Value {
-    let pos = bu.use_var(stack);
-    let new_pos = bu.ins().iadd_imm(pos, -CLAC_VALUE_STRIDE);
-    bu.def_var(stack, new_pos);
+    let new_pos = emit_pop_loadless(bu, stack);
 
     bu.ins().load(CRANELIFT_VALUE, ALIGNED, new_pos, 0)
 }
@@ -60,6 +66,19 @@ fn emit_pick(bu: &mut FunctionBuilder, stack: Variable, offset: Value) {
     let loaded = bu.ins().load(CRANELIFT_VALUE, ALIGNED, target_pos, 0);
     emit_push(bu, stack, loaded);
 }
+
+/*
+
+Optimization Ideas:
+
+- Simulate as much of stack as possible in compile time -> have a constant folding step first (to improve our analysis).
+    1 1 + pick => 2 pick
+
+- Reduce flushes with better analysis
+
+- Super well behaved clac functions, instead of passing values by stack, it passes it directly as function parameters (like through rdi, rsi, etc,)
+
+*/
 
 #[cfg(debug_assertions)]
 fn debug_simulate_breaks(func: &[types::Instr]) {}
@@ -143,7 +162,7 @@ fn make_blockmap<'a>(
 }
 
 fn compile_block(
-    block: (usize, &ClacBlock),
+    (head, ClacBlock(line, block)): (usize, &ClacBlock),
     total_len: usize,
     blockmap: &BlockMap,
     calleemap: &ahash::HashMap<FuncId, FuncRef>,
@@ -153,7 +172,6 @@ fn compile_block(
     refs: &ImportRefs,
 ) {
     println!("compiling block = {:?}", block);
-    let (head, ClacBlock(line, block)) = block;
     let line = *line;
     let block = *block;
 
@@ -185,12 +203,18 @@ fn compile_block(
         tmp.pop().unwrap_or_else(|| emit_pop(bu, stack))
     };
 
+    let xpop_no_value = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
+        tmp.pop().unwrap_or_else(|| emit_pop_loadless(bu, stack))
+    };
+
     let xpick = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
         let popped = xpop(tmp, bu);
         flush(tmp, bu);
 
         emit_pick(bu, stack, popped);
     };
+
+    let is_last_block = head == *blockmap.last_key_value().unwrap().0;
 
     for (i, inst) in line.iter().enumerate() {
         use types::Instr;
@@ -238,7 +262,7 @@ fn compile_block(
                 tmp.push(x);
             }
             Instr::Drop => {
-                xpop(&mut tmp, bu);
+                xpop_no_value(&mut tmp, bu);
             }
             Instr::Print => {
                 let popped = xpop(&mut tmp, bu);
@@ -249,7 +273,8 @@ fn compile_block(
             }
             Instr::Pick => xpick(&mut tmp, bu),
             Instr::If => {
-                debug_assert!((&line[i + 1..]).len() == 0);
+                debug_assert!(i == line.len() - 1);
+
                 let cond = xpop(&mut tmp, bu);
 
                 let success = blockmap.get(&(real_i + 1)).unwrap().1;
@@ -278,7 +303,7 @@ fn compile_block(
 
                     return;
                 } else {
-                    debug_assert!((&line[i + 1..]).len() == 0);
+                    debug_assert!(i == line.len() - 1);
                     let mut switch = Switch::new();
 
                     let start = real_i + 1;
@@ -318,6 +343,12 @@ fn compile_block(
 
                 flush(&mut tmp, bu);
                 let final_stack = bu.use_var(stack);
+
+                if i == line.len() - 1 && is_last_block {
+                    bu.ins().return_call(*func, &[final_stack]);
+                    return;
+                }
+
                 let ret = bu.ins().call(*func, &[final_stack]);
                 // update stack
                 let ret = bu.inst_results(ret)[0];
@@ -328,9 +359,7 @@ fn compile_block(
 
     flush(&mut tmp, bu);
 
-    if line.len() != 0
-        && let Some(next) = blockmap.get(&(head + line.len()))
-    {
+    if !is_last_block && let Some(next) = blockmap.get(&(head + line.len())) {
         println!("GOT NEXT = {:?}", next);
 
         flush(&mut tmp, bu);
@@ -376,7 +405,7 @@ impl JITState {
         Signature {
             params: vec![ptr_arg],  // *mut ClacValue
             returns: vec![ptr_arg], // *mut ClacValue
-            call_conv: self.module.isa().default_call_conv(),
+            call_conv: cranelift::prelude::isa::CallConv::Tail,
         }
     }
 
