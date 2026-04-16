@@ -309,12 +309,7 @@ pub fn repl(state: &mut ClacState, hide_stack: bool) -> Result<(), ReplError> {
 
     loop {
         let read = match editor.readline("clac++> ") {
-            Err(ReadlineError::Eof) => return Ok(()),
-            Err(ReadlineError::Interrupted) => {
-                // TODO: remove
-                unsafe { std::arch::asm!("int3") };
-                continue;
-            }
+            Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => return Ok(()),
             Err(e) => return Err(e.into()),
             Ok(res) => {
                 editor.add_history_entry(&res)?;
