@@ -39,7 +39,7 @@ pub(crate) enum Arith {
 #[derive(Debug, Clone)]
 pub(crate) enum Mem {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 // Internal clac instruction
 pub(crate) enum Instr {
     // data
@@ -123,7 +123,7 @@ pub(crate) type Code = Vec<Instr>;
 
 pub(crate) type JITFunction = unsafe extern "C" fn(*mut Value) -> *mut Value;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Function {
     Native(fn(&mut Stack)),
 

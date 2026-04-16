@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::types::{self, Arith, CRANELIFT_VALUE, Function, Instr, JITFunction, JITState};
+use ahash::HashMapExt;
 use cranelift::{
     codegen::ir::FuncRef,
     frontend::Switch,
@@ -13,19 +14,19 @@ use cranelift::{
     },
 };
 
+use types::FuncRef as ClacRef;
 use types::Value as ClacValue;
 
 use cranelift_module::{FuncId, Module, ModuleError, ModuleResult};
 use thiserror::Error;
 
-pub enum JITError {
-    IndeterminateControlFlow,
-}
-
 #[derive(Debug, Error)]
 pub(crate) enum CompilerError {
     #[error("Module (cranelift) Error: {0}")]
     ModuleError(#[from] ModuleError),
+
+    #[error("JIT Compilation Error: {0}")]
+    JITError(#[from] JITError),
 }
 
 const CLAC_VALUE_STRIDE: i64 = size_of::<ClacValue>() as i64;
@@ -63,14 +64,14 @@ fn emit_pick(bu: &mut FunctionBuilder, stack: Variable, offset: Value) {
 #[cfg(debug_assertions)]
 fn debug_simulate_breaks(func: &[types::Instr]) {}
 
-fn get_block_breaks(func: &[types::Instr]) -> Option<BTreeSet<usize>> {
+fn get_block_breaks(func: &[types::Instr]) -> Result<BTreeSet<usize>, JITError> {
     let mut ret: BTreeSet<usize> = BTreeSet::new();
 
-    let insert_checked = |set: &mut BTreeSet<usize>, val: usize| -> Option<bool> {
+    let insert_checked = |set: &mut BTreeSet<usize>, val: usize| -> Result<bool, JITError> {
         if val <= func.len() {
-            Some(set.insert(val))
+            Ok(set.insert(val))
         } else {
-            None
+            Err(JITError::IndeterminateControlFlow)
         }
     };
 
@@ -91,7 +92,7 @@ fn get_block_breaks(func: &[types::Instr]) -> Option<BTreeSet<usize>> {
                     && let Some(Instr::Literal(n)) = func.get(i - 1)
                 {
                     // no break here, we can use constant optimization
-                    let conv: usize = (*n).try_into().ok()?;
+                    let conv: usize = (*n).try_into().map_err(|_| JITError::BadSkip)?;
 
                     let new: usize = i + conv + 1;
                     insert_checked(&mut ret, new)?;
@@ -109,7 +110,7 @@ fn get_block_breaks(func: &[types::Instr]) -> Option<BTreeSet<usize>> {
         debug_assert!(*i <= func.len());
     }
 
-    Some(ret)
+    Ok(ret)
 }
 
 fn breaks_to_slicemap(
@@ -145,6 +146,8 @@ fn compile_block(
     block: (usize, &ClacBlock),
     total_len: usize,
     blockmap: &BlockMap,
+    calleemap: &ahash::HashMap<FuncId, FuncRef>,
+    funcs: &[Function],
     stack: Variable,
     bu: &mut FunctionBuilder,
     refs: &ImportRefs,
@@ -208,7 +211,10 @@ fn compile_block(
                     Arith::Mul => bu.ins().imul(a, b),
                     Arith::Div => bu.ins().sdiv(a, b),
                     Arith::Rem => bu.ins().srem(a, b),
-                    Arith::Lt => bu.ins().icmp(IntCC::SignedLessThan, a, b),
+                    Arith::Lt => {
+                        let cmp = bu.ins().icmp(IntCC::SignedLessThan, a, b);
+                        bu.ins().sextend(CRANELIFT_VALUE, cmp)
+                    }
                     Arith::Pow => {
                         let call = bu.ins().call(refs.powfunc, &[a, b]);
                         bu.inst_results(call)[0]
@@ -295,7 +301,28 @@ fn compile_block(
                     return;
                 };
             }
-            _ => todo!(),
+            Instr::FunctionCall(func) => {
+                let ClacRef::Resolved(idx) = func else {
+                    println!("TRYING TO CALL UNRESOLVED FUNCTION: {func:?}");
+                    bu.ins().trap(TrapCode::unwrap_user(67));
+                    return;
+                };
+                let Function::User(Some(funcid), _) = &funcs[*idx] else {
+                    println!("Could not get func={func:?}");
+                    bu.ins().trap(TrapCode::unwrap_user(67));
+
+                    return;
+                };
+
+                let func = calleemap.get(funcid).unwrap();
+
+                flush(&mut tmp, bu);
+                let final_stack = bu.use_var(stack);
+                let ret = bu.ins().call(*func, &[final_stack]);
+                // update stack
+                let ret = bu.inst_results(ret)[0];
+                bu.def_var(stack, ret);
+            }
         }
     }
 
@@ -325,6 +352,18 @@ struct ImportRefs {
     powfunc: FuncRef,
 }
 
+#[derive(Debug, Error)]
+pub enum JITError {
+    #[error("Indeterminate Control Flow")]
+    IndeterminateControlFlow,
+
+    #[error("Detected a negative skip!")]
+    BadSkip,
+
+    #[error("Could not compile due to function calling non-compiled function")]
+    CallsUnknownFunctions,
+}
+
 impl JITState {
     pub(crate) fn get_function(&self, func: FuncId) -> JITFunction {
         unsafe { transmute_copy(&self.module.get_finalized_function(func)) }
@@ -341,12 +380,52 @@ impl JITState {
         }
     }
 
+    fn build_callee_map(
+        &mut self,
+        line: &[types::Instr],
+        funcs: &[Function],
+    ) -> Result<ahash::HashMap<FuncId, FuncRef>, JITError> {
+        let mut ret = ahash::HashMap::new();
+
+        for instr in line {
+            if let Instr::FunctionCall(fr) = instr {
+                match fr {
+                    ClacRef::Resolved(idx) => {
+                        let func = &funcs[*idx];
+
+                        if let Function::User(Some(fid), _) = func {
+                            ret.insert(
+                                *fid,
+                                self.module.declare_func_in_func(*fid, &mut self.ctx.func),
+                            );
+                        } else {
+                            // Trying to call an uncompiled function.
+                            // return Err(JITError::CallsUnknownFunctions);
+                        }
+                    }
+                    ClacRef::Unresolved(_) => {
+                        //return Err(JITError::CallsUnknownFunctions)
+                    }
+                }
+            }
+        }
+
+        Ok(ret)
+    }
+
     pub(crate) fn compile_function(
         &mut self,
         id: FuncId,
         line: &[types::Instr],
+        funcs: &[Function],
     ) -> Result<(), CompilerError> {
+        self.module.clear_context(&mut self.ctx);
+
         let sig = self.generate_signature();
+
+        let callees = self.build_callee_map(line, funcs)?;
+        println!("Callees = {:?}", callees);
+
         let types::JITState {
             ctx,
             fbctx,
@@ -360,7 +439,6 @@ impl JITState {
                 },
         } = self;
 
-        module.clear_context(ctx);
         ctx.func.signature = sig;
 
         let refs = ImportRefs {
@@ -370,7 +448,7 @@ impl JITState {
             powfunc: module.declare_func_in_func(*powfunc, &mut ctx.func),
         };
 
-        let breaks = get_block_breaks(line).unwrap();
+        let breaks = get_block_breaks(line)?;
         println!("{:?}", breaks);
         let slice_map = breaks_to_slicemap(breaks, line);
         println!("{:?}", slice_map);
@@ -395,13 +473,23 @@ impl JITState {
         let stack = stack_var;
 
         for (i, block) in &block_map {
-            compile_block((*i, block), line.len(), &block_map, stack, &mut bu, &refs);
+            compile_block(
+                (*i, block),
+                line.len(),
+                &block_map,
+                &callees,
+                funcs,
+                stack,
+                &mut bu,
+                &refs,
+            );
         }
 
         // bu.seal_all_blocks(); // FIXME: investigate
         bu.finalize();
 
-        // TODO: if cranelift adds an ability to free previously declared functions, we should do that.
+        // println!("{}", ctx.func.display());
+
         module.define_function(id, ctx)?;
 
         Ok(())
@@ -414,36 +502,49 @@ impl types::ClacState {
         self.declare_functions_in_jit_module()?;
 
         // compile all functions
-        self.compile_all()?;
+        self.compile_all();
 
         self.jit.module.finalize_definitions()?;
+
+        for (name, idx) in &self.funcmap.map {
+            let loc = &self.funcmap.functions[*idx];
+
+            if let Function::User(Some(id), _) = loc {
+                println!(
+                    "Function {name} = {loc:?} (JIT @ {:?})",
+                    self.jit.get_function(*id)
+                );
+            }
+        }
 
         Ok(())
     }
 
-    pub(crate) fn compile_all(&mut self) -> ModuleResult<()> {
+    // tries to compile all functions, ignoring the functions that fail to be compiled
+    pub(crate) fn compile_all(&mut self) {
+        // FIXME: remove clone
+        let clone = &self.funcmap.functions.clone();
         for function in &mut self.funcmap.functions {
             if let Function::User(fid, code) = function {
-                match self.jit.compile_function((*fid).unwrap(), code) {
+                match self.jit.compile_function((*fid).unwrap(), code, clone) {
                     Ok(()) => {
                         println!("Successfully compiled {fid:?} (code = {code:?})");
                     }
                     Err(err) => {
-                        println!("Could not compile {fid:?} because {err} (code = {code:?})",);
-                        *fid = None;
+                        panic!("Could not compile {fid:?} because {err:?} (code = {code:?})",);
                     }
                 }
             }
         }
-        Ok(())
     }
 
     pub(crate) fn declare_functions_in_jit_module(&mut self) -> ModuleResult<()> {
         let sig = self.jit.generate_signature();
 
         for function in &mut self.funcmap.functions {
-            if let Function::User(funcid, _) = function {
+            if let Function::User(funcid, code) = function {
                 *funcid = Some(self.jit.module.declare_anonymous_function(&sig)?);
+                println!("Function {funcid:?} has code = {code:?}");
             }
         }
 
