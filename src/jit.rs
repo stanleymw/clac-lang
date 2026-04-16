@@ -1,9 +1,16 @@
-use std::{collections::BTreeSet, mem::transmute_copy};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    mem::transmute_copy,
+};
 
 use crate::types::{self, Arith, CRANELIFT_VALUE, Instr};
-use ahash::{HashSet, HashSetExt};
-use cranelift::prelude::{
-    AbiParam, FunctionBuilder, InstBuilder, IntCC, MemFlags, Signature, Value, Variable, types::I64,
+use ahash::{HashMapExt, HashSet, HashSetExt};
+use cranelift::{
+    codegen::ir::FuncRef,
+    prelude::{
+        AbiParam, FunctionBuilder, InstBuilder, IntCC, MemFlags, Signature, Value, Variable,
+        types::I64,
+    },
 };
 
 use types::Value as ClacValue;
@@ -73,6 +80,7 @@ fn get_block_breaks(func: &[types::Instr]) -> Option<BTreeSet<usize>> {
             Instr::If => {
                 // you can jump ahead by a fixed amount
                 insert_checked(&mut ret, i + 4)?;
+                insert_checked(&mut ret, i + 1)?;
             }
             Instr::Skip => {
                 // 2 cases:
@@ -82,17 +90,12 @@ fn get_block_breaks(func: &[types::Instr]) -> Option<BTreeSet<usize>> {
                     && let Some(Instr::Literal(n)) = func.get(i - 1)
                 {
                     // no break here, we can use constant optimization
-                    match n {
-                        0 => {} // 0 skip does nothing
-                        n => {
-                            let conv: usize = (*n).try_into().ok()?;
+                    let conv: usize = (*n).try_into().ok()?;
 
-                            let new: usize = i + conv + 1;
-                            insert_checked(&mut ret, new)?;
-                        }
-                    }
+                    let new: usize = i + conv + 1;
+                    insert_checked(&mut ret, new)?;
                 } else {
-                    for new in (i + 2)..=func.len() {
+                    for new in (i + 1)..=func.len() {
                         ret.insert(new);
                     }
                 }
@@ -106,6 +109,171 @@ fn get_block_breaks(func: &[types::Instr]) -> Option<BTreeSet<usize>> {
     }
 
     Some(ret)
+}
+
+fn breaks_to_slicemap(
+    breaks: BTreeSet<usize>,
+    line: &[types::Instr],
+) -> BTreeMap<usize, &[types::Instr]> {
+    let mut last: usize = 0;
+    let mut res = BTreeMap::new();
+    for br in breaks {
+        res.insert(last, &line[last..br]);
+        last = br
+    }
+    res.insert(last, &line[last..]);
+
+    res
+}
+
+#[derive(Debug)]
+struct ClacBlock<'a>(&'a [types::Instr], cranelift::prelude::Block);
+
+type BlockMap<'a> = BTreeMap<usize, ClacBlock<'a>>;
+
+fn make_blockmap<'a>(
+    tree: BTreeMap<usize, &'a [types::Instr]>,
+    bu: &mut FunctionBuilder,
+) -> BlockMap<'a> {
+    tree.iter()
+        .map(|(i, instrs)| (*i, ClacBlock(instrs, bu.create_block())))
+        .collect()
+}
+
+fn compile_block(
+    block: (usize, &ClacBlock),
+    blockmap: &BlockMap,
+    stack: Variable,
+    bu: &mut FunctionBuilder,
+    refs: &ImportRefs,
+) {
+    println!("compiling block = {:?}", block);
+    let (head, ClacBlock(line, block)) = block;
+    let line = *line;
+    let block = *block;
+
+    bu.switch_to_block(block);
+    bu.seal_block(block);
+
+    // Idea:
+    // 2 levels of stack
+    // there is the REAL stack (passed in pointer)
+    // and also a build/function stack (*mut ClacStack)
+    //
+    // Before if statements/control flow, we commit/flush the build function stack, which means pushing everything onto the build function stack onto the real stack.
+    // if we get to the final block, then we geneate instructions to push all of the build stack onto the REAL stack.
+    // must also flush before Pick
+    //
+    // every function is fn(*mut ClacStack) -> *mut ClacStack
+
+    let mut tmp: Vec<Value> = Vec::new();
+
+    let flush = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
+        for val in &*tmp {
+            emit_push(bu, stack, *val);
+        }
+
+        tmp.clear();
+    };
+
+    let xpop = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
+        tmp.pop().unwrap_or_else(|| emit_pop(bu, stack))
+    };
+
+    let xpick = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
+        let popped = xpop(tmp, bu);
+        flush(tmp, bu);
+
+        emit_pick(bu, stack, popped);
+    };
+
+    for (i, inst) in line.iter().enumerate() {
+        use types::Instr;
+        let real_i = head + i;
+
+        match inst {
+            Instr::Literal(n) => {
+                let out = bu.ins().iconst(I64, *n);
+                tmp.push(out);
+            }
+            Instr::Arith(it) => {
+                let b = xpop(&mut tmp, bu);
+                let a = xpop(&mut tmp, bu);
+
+                tmp.push(match it {
+                    Arith::Add => bu.ins().iadd(a, b),
+                    Arith::Sub => bu.ins().isub(a, b),
+                    Arith::Mul => bu.ins().imul(a, b),
+                    Arith::Div => bu.ins().sdiv(a, b),
+                    Arith::Rem => bu.ins().srem(a, b),
+                    Arith::Lt => bu.ins().icmp(IntCC::SignedLessThan, a, b),
+                    Arith::Pow => {
+                        let call = bu.ins().call(refs.powfunc, &[a, b]);
+                        bu.inst_results(call)[0]
+                    }
+                });
+            }
+            Instr::Swap => {
+                let b = xpop(&mut tmp, bu);
+                let a = xpop(&mut tmp, bu);
+
+                tmp.push(b);
+                tmp.push(a);
+            }
+            Instr::Rot => {
+                let z = xpop(&mut tmp, bu);
+                let y = xpop(&mut tmp, bu);
+                let x = xpop(&mut tmp, bu);
+
+                tmp.push(y);
+                tmp.push(z);
+                tmp.push(x);
+            }
+            Instr::Drop => {
+                xpop(&mut tmp, bu);
+            }
+            Instr::Print => {
+                let popped = xpop(&mut tmp, bu);
+                bu.ins().call(refs.printfunc, &[popped]);
+            }
+            Instr::Quit => {
+                bu.ins().call(refs.quitfunc, &[]);
+            }
+            Instr::Pick => xpick(&mut tmp, bu),
+            Instr::If => {
+                let cond = xpop(&mut tmp, bu);
+
+                let success = blockmap.get(&(real_i + 1)).unwrap().1;
+                let fail = blockmap.get(&(real_i + 4)).unwrap().1;
+
+                flush(&mut tmp, bu);
+                bu.ins().brif(cond, success, &[], fail, &[]);
+                return;
+            }
+            _instr => todo!("{:?}", _instr),
+        }
+    }
+
+    flush(&mut tmp, bu);
+
+    if let Some(next) = blockmap.get(&(head + line.len())) {
+        bu.ins().jump(next.1, &[]);
+    } else {
+        // TODO: assert(FINAL BLOCK)
+        // debug_assert!(
+        //     head+line.len() ==
+        // )
+
+        let final_stack = bu.use_var(stack);
+        bu.ins().return_(&[final_stack]);
+    }
+}
+
+struct ImportRefs {
+    printfunc: FuncRef,
+    quitfunc: FuncRef,
+    errorfunc: FuncRef,
+    powfunc: FuncRef,
 }
 
 impl types::ClacState {
@@ -126,10 +294,6 @@ impl types::ClacState {
                 },
         } = &mut self.jit;
 
-        println!("{:?}", get_block_breaks(line).unwrap());
-
-        return todo!();
-
         module.clear_context(ctx);
 
         let ptr_t = module.isa().pointer_type();
@@ -141,119 +305,40 @@ impl types::ClacState {
             call_conv: module.isa().default_call_conv(),
         };
 
-        let printfunc = module.declare_func_in_func(*printfunc, &mut ctx.func);
-        let quitfunc = module.declare_func_in_func(*quitfunc, &mut ctx.func);
-        let errorfunc = module.declare_func_in_func(*errorfunc, &mut ctx.func);
-        let powfunc = module.declare_func_in_func(*powfunc, &mut ctx.func);
+        let refs = ImportRefs {
+            printfunc: module.declare_func_in_func(*printfunc, &mut ctx.func),
+            quitfunc: module.declare_func_in_func(*quitfunc, &mut ctx.func),
+            errorfunc: module.declare_func_in_func(*errorfunc, &mut ctx.func),
+            powfunc: module.declare_func_in_func(*powfunc, &mut ctx.func),
+        };
+
+        let breaks = get_block_breaks(line).unwrap();
+        println!("{:?}", breaks);
+        let slice_map = breaks_to_slicemap(breaks, line);
+        println!("{:?}", slice_map);
 
         let mut bu = FunctionBuilder::new(&mut ctx.func, fbctx);
 
-        let entry = bu.create_block();
-        bu.append_block_params_for_function_params(entry);
-        bu.switch_to_block(entry);
-        bu.seal_block(entry);
+        let block_map = make_blockmap(slice_map, &mut bu);
+        println!("{:?}", block_map);
 
-        // Idea:
-        // 2 levels of stack
-        // there is the REAL stack (passed in pointer)
-        // and also a build/function stack (*mut ClacStack)
-        //
-        // Before if statements/control flow, we commit/flush the build function stack, which means pushing everything onto the build function stack onto the real stack.
-        // if we get to the final block, then we geneate instructions to push all of the build stack onto the REAL stack.
-        // must also flush before Pick
-        //
-        // then every function is fn(*mut ClacStack) -> ()
+        let ClacBlock(_, entry) = block_map.get(&0).unwrap();
+
+        let entry = *entry;
+        bu.switch_to_block(entry);
+        println!("entry = {}", entry);
+        bu.append_block_params_for_function_params(entry);
+
         let stack = bu.block_params(entry)[0];
+
         let stack_var = bu.declare_var(module.isa().pointer_type());
         bu.def_var(stack_var, stack);
+
         let stack = stack_var;
 
-        let mut tmp: Vec<Value> = Vec::new();
-
-        let flush = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
-            for val in &*tmp {
-                emit_push(bu, stack, *val);
-            }
-
-            tmp.clear();
-        };
-
-        // let mut xpush = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
-        //     tmp.pop().unwrap_or_else(|| {
-        //         let call_instr = bu.ins().call(popper, &[stack]);
-        //     })
-        // };
-
-        let xpop = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
-            tmp.pop().unwrap_or_else(|| emit_pop(bu, stack))
-        };
-
-        let xpick = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
-            let popped = xpop(tmp, bu);
-            flush(tmp, bu);
-
-            emit_pick(bu, stack, popped);
-        };
-
-        for inst in line {
-            use types::Instr;
-            match inst {
-                Instr::Literal(n) => {
-                    let out = bu.ins().iconst(I64, *n);
-                    tmp.push(out);
-                }
-                Instr::Arith(it) => {
-                    let b = xpop(&mut tmp, &mut bu);
-                    let a = xpop(&mut tmp, &mut bu);
-
-                    tmp.push(match it {
-                        Arith::Add => bu.ins().iadd(a, b),
-                        Arith::Sub => bu.ins().isub(a, b),
-                        Arith::Mul => bu.ins().imul(a, b),
-                        Arith::Div => bu.ins().sdiv(a, b),
-                        Arith::Rem => bu.ins().srem(a, b),
-                        Arith::Lt => bu.ins().icmp(IntCC::SignedLessThan, a, b),
-                        Arith::Pow => {
-                            let call = bu.ins().call(powfunc, &[a, b]);
-                            bu.inst_results(call)[0]
-                        }
-                    });
-                }
-                Instr::Swap => {
-                    let b = xpop(&mut tmp, &mut bu);
-                    let a = xpop(&mut tmp, &mut bu);
-
-                    tmp.push(b);
-                    tmp.push(a);
-                }
-                Instr::Rot => {
-                    let z = xpop(&mut tmp, &mut bu);
-                    let y = xpop(&mut tmp, &mut bu);
-                    let x = xpop(&mut tmp, &mut bu);
-
-                    tmp.push(y);
-                    tmp.push(z);
-                    tmp.push(x);
-                }
-                Instr::Drop => {
-                    xpop(&mut tmp, &mut bu);
-                }
-                Instr::Print => {
-                    let popped = xpop(&mut tmp, &mut bu);
-                    bu.ins().call(printfunc, &[popped]);
-                }
-                Instr::Quit => {
-                    bu.ins().call(quitfunc, &[]);
-                }
-                Instr::Pick => xpick(&mut tmp, &mut bu),
-                _instr => todo!("{:?}", _instr),
-            }
+        for (i, block) in &block_map {
+            compile_block((*i, block), &block_map, stack, &mut bu, &refs);
         }
-
-        flush(&mut tmp, &mut bu);
-
-        let final_stack = bu.use_var(stack);
-        let _ret = bu.ins().return_(&[final_stack]);
 
         bu.seal_all_blocks(); // FIXME: investigate
         bu.finalize();
