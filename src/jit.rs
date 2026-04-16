@@ -7,9 +7,10 @@ use crate::types::{self, Arith, CRANELIFT_VALUE, Instr};
 use ahash::{HashMapExt, HashSet, HashSetExt};
 use cranelift::{
     codegen::ir::FuncRef,
+    frontend::Switch,
     prelude::{
-        AbiParam, FunctionBuilder, InstBuilder, IntCC, MemFlags, Signature, Value, Variable,
-        types::I64,
+        AbiParam, FunctionBuilder, InstBuilder, IntCC, MemFlags, Signature, TrapCode, Value,
+        Variable, types::I64,
     },
 };
 
@@ -87,6 +88,7 @@ fn get_block_breaks(func: &[types::Instr]) -> Option<BTreeSet<usize>> {
                 // if there is no BREAK at this position, and the previous value is a constant, then we are guaranteed to know how much we are going to jump by.
                 // assuming that we have found all of the breaks up to this point. (TODO: PROVE THIS IS CORRECT)
                 if !ret.contains(&i)
+                    && i > 0
                     && let Some(Instr::Literal(n)) = func.get(i - 1)
                 {
                     // no break here, we can use constant optimization
@@ -142,6 +144,7 @@ fn make_blockmap<'a>(
 
 fn compile_block(
     block: (usize, &ClacBlock),
+    total_len: usize,
     blockmap: &BlockMap,
     stack: Variable,
     bu: &mut FunctionBuilder,
@@ -241,6 +244,7 @@ fn compile_block(
             }
             Instr::Pick => xpick(&mut tmp, bu),
             Instr::If => {
+                debug_assert!((&line[i + 1..]).len() == 0);
                 let cond = xpop(&mut tmp, bu);
 
                 let success = blockmap.get(&(real_i + 1)).unwrap().1;
@@ -248,21 +252,62 @@ fn compile_block(
 
                 flush(&mut tmp, bu);
                 bu.ins().brif(cond, success, &[], fail, &[]);
+
                 return;
             }
-            _instr => todo!("{:?}", _instr),
+            Instr::Skip => {
+                debug_assert!((&line[i + 1..]).len() == 0);
+                if i > 0
+                    && let Some(Instr::Literal(n)) = line.get(i - 1)
+                {
+                    let pop = xpop(&mut tmp, bu);
+                    // TODO: assert popped == n
+
+                    // no break here, we can use constant optimization
+                    let conv: usize = (*n).try_into().ok().unwrap();
+
+                    let new: usize = real_i + conv + 1;
+                    let target = blockmap.get(&new).unwrap().1;
+
+                    bu.ins().jump(target, &[]);
+
+                    return;
+                } else {
+                    let mut switch = Switch::new();
+
+                    let start = real_i + 1;
+                    for new in start..=total_len {
+                        let found = blockmap.get(&new).unwrap().1;
+                        switch.set_entry((new - start) as u128, found);
+                    }
+                    let popped = xpop(&mut tmp, bu);
+
+                    // FIXME: dont create duplicates
+                    let abort = bu.create_block();
+
+                    switch.emit(bu, popped, abort);
+
+                    bu.switch_to_block(abort);
+                    bu.seal_block(abort);
+                    bu.ins().trap(TrapCode::unwrap_user(67));
+
+                    return;
+                };
+            }
+            _ => todo!(),
         }
     }
 
     flush(&mut tmp, bu);
 
-    if let Some(next) = blockmap.get(&(head + line.len())) {
+    if line.len() != 0
+        && let Some(next) = blockmap.get(&(head + line.len()))
+    {
+        println!("GOT NEXT = {:?}", next);
         bu.ins().jump(next.1, &[]);
     } else {
-        // TODO: assert(FINAL BLOCK)
-        // debug_assert!(
-        //     head+line.len() ==
-        // )
+        // assert(FINAL BLOCK)
+        debug_assert!(head + line.len() == total_len);
 
         let final_stack = bu.use_var(stack);
         bu.ins().return_(&[final_stack]);
@@ -337,10 +382,10 @@ impl types::ClacState {
         let stack = stack_var;
 
         for (i, block) in &block_map {
-            compile_block((*i, block), &block_map, stack, &mut bu, &refs);
+            compile_block((*i, block), line.len(), &block_map, stack, &mut bu, &refs);
         }
 
-        bu.seal_all_blocks(); // FIXME: investigate
+        // bu.seal_all_blocks(); // FIXME: investigate
         bu.finalize();
 
         println!("Pre-optimize: {}", ctx.func.display());
