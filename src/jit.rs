@@ -4,12 +4,11 @@ use std::{
 };
 
 use crate::types::{self, Arith, CRANELIFT_VALUE, Instr, JITFunction, JITState};
-use ahash::HashMapExt;
+use ahash::AHashMap;
 use cranelift::{
     codegen::{
-        control::ControlPlane,
         cursor::{Cursor, CursorPosition, FuncCursor},
-        ir::{self, FuncRef, InstructionData, Opcode, ValueList},
+        ir::{BlockArg, FuncRef, InstructionData, Opcode},
     },
     frontend::Switch,
     prelude::{
@@ -423,8 +422,8 @@ impl JITState {
         &mut self,
         line: &[types::Instr],
         funcs: &[ClacFunction],
-    ) -> Result<ahash::HashMap<FuncId, FuncRef>, JITError> {
-        let mut ret = ahash::HashMap::new();
+    ) -> Result<AHashMap<FuncId, FuncRef>, JITError> {
+        let mut ret = AHashMap::new();
 
         for instr in line {
             if let Instr::FunctionCall(fr) = instr {
@@ -594,9 +593,11 @@ fn trivially_has_side_effects(opcode: cranelift::codegen::ir::Opcode) -> bool {
 }
 
 // we need to make sure this return is the same as the resulting stack
-fn follow_jump_path_to_return_unless_side_effect_found(
+fn function_results_from_following_jump_path_to_return_unless_side_effect_found(
     cursor: &mut FuncCursor,
-) -> Option<(ir::Inst, ValueList)> {
+) -> Option<Vec<Value>> {
+    let mut mapper = AHashMap::new();
+
     while let Some(inst) = cursor.next_inst() {
         let real = cursor.func.dfg.insts[inst];
         // Ensure that the remaining functions do no side effects, and that the terminator == return || ALWAYS GOES TO the END BLOCK
@@ -607,13 +608,37 @@ fn follow_jump_path_to_return_unless_side_effect_found(
                 destination: bc,
             } => {
                 let out = bc.block(&cursor.func.dfg.value_lists);
+
+                let jump_args = bc.args(&cursor.func.dfg.value_lists);
+                let block_args = cursor.func.dfg.block_params(out);
+
+                mapper.extend(block_args.iter().copied().zip(jump_args.map(|blockarg| {
+                    let BlockArg::Value(x) = blockarg else {
+                        panic!("Not value blockarg")
+                    };
+                    x
+                })));
+
                 cursor.set_position(CursorPosition::Before(out));
             }
             InstructionData::MultiAry {
                 opcode: Opcode::Return,
                 args: elist,
             } => {
-                return Some((inst, elist));
+                let mut ret = Vec::new();
+
+                println!("RESOLVED RETS: {mapper:?}");
+
+                for mut arg in elist.as_slice(&cursor.func.dfg.value_lists) {
+                    // resolve fully
+                    while let Some(next) = mapper.get(arg) {
+                        arg = next;
+                    }
+
+                    ret.push(*arg);
+                }
+
+                return Some(ret);
             }
             x if trivially_has_side_effects(x.opcode()) => return None,
             _ => {}
@@ -653,19 +678,21 @@ fn optimize_tailcall(
         let pos = cursor.position();
         debug_assert_eq!(pos, CursorPosition::At(badcall));
 
-        let ret = follow_jump_path_to_return_unless_side_effect_found(&mut cursor);
+        let ret = function_results_from_following_jump_path_to_return_unless_side_effect_found(
+            &mut cursor,
+        );
 
         cursor.set_position(pos);
         debug_assert_eq!(cursor.position(), CursorPosition::At(badcall));
 
-        let Some((ret_inst, ret_args)) = ret else {
+        let Some(ret_args) = ret else {
             continue;
         };
 
         // result from our call
         let resulting_stack = cursor.func.dfg.inst_results(badcall);
         // returning to the function
-        if ret_args.as_slice(&cursor.func.dfg.value_lists) != resulting_stack {
+        if ret_args != resulting_stack {
             continue;
         }
 
