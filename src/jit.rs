@@ -8,7 +8,7 @@ use ahash::AHashMap;
 use cranelift::{
     codegen::{
         cursor::{Cursor, CursorPosition, FuncCursor},
-        ir::{BlockArg, FuncRef, InstructionData, Opcode},
+        ir::{BlockArg, FuncRef, InstructionData, Opcode, ValueDef},
     },
     frontend::Switch,
     prelude::{
@@ -229,14 +229,26 @@ fn compile_block(
         tmp.pop().unwrap_or_else(|| emit_pop_loadless(bu, stack))
     };
 
-    let xpick = |tmp: &mut Vec<Value>, bu: &mut FunctionBuilder| {
-        let popped = xpop(tmp, bu);
-        flush(tmp, bu);
-
-        emit_pick(bu, stack, popped);
-    };
-
     let is_last_block = head == *blockmap.last_key_value().unwrap().0;
+
+    let value_to_const =
+        |func: &cranelift::codegen::ir::Function, val: Value| -> Option<ClacValue> {
+            let valuedef = func.dfg.value_def(val);
+
+            let ValueDef::Result(inst, 0) = valuedef else {
+                return None;
+            };
+
+            let res = func.dfg.insts[inst];
+            let InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm: num,
+            } = res
+            else {
+                return None;
+            };
+            Some(num.into())
+        };
 
     for (i, inst) in line.iter().enumerate() {
         use types::Instr;
@@ -293,7 +305,14 @@ fn compile_block(
             Instr::Quit => {
                 bu.ins().call(refs.quitfunc, &[]);
             }
-            Instr::Pick => xpick(&mut tmp, bu),
+            Instr::Pick => {
+                let popped = xpop(&mut tmp, bu);
+
+                // TODO: improve
+                flush(&mut tmp, bu);
+
+                emit_pick(bu, stack, popped);
+            }
             Instr::If => {
                 debug_assert!(i == line.len() - 1);
 
@@ -311,8 +330,7 @@ fn compile_block(
                 if i > 0
                     && let Some(Instr::Literal(n)) = line.get(i - 1)
                 {
-                    let pop = xpop_no_value(&mut tmp, bu);
-                    // TODO: assert popped == n
+                    assert_eq!(value_to_const(bu.func, tmp.pop().unwrap()).unwrap(), *n);
 
                     // no break here, we can use constant optimization
                     let conv: usize = (*n).try_into().ok().unwrap();
@@ -411,6 +429,34 @@ fn compile_block(
                 };
             }
             // TODO: optimize by special casing on compile time known ranges
+            Instr::DropRange
+                if i >= 2
+                    && let &[Instr::Literal(start), Instr::Literal(amount)] = &line[i - 2..i] =>
+            {
+                assert_eq!(value_to_const(bu.func, tmp.pop().unwrap()).unwrap(), amount);
+
+                assert_eq!(value_to_const(bu.func, tmp.pop().unwrap()).unwrap(), start);
+
+                // bu.emit_small_memory_copy( config, dest, src, size, dest_align, src_align, non_overlapping, flags, );
+
+                assert!(amount >= 0);
+                assert!(start >= amount);
+
+                let keep: usize = (start - amount).try_into().unwrap();
+                let mut out = Vec::with_capacity(keep);
+
+                for _ in 0..keep {
+                    out.push(xpop(&mut tmp, bu));
+                }
+
+                for _ in 0..amount {
+                    xpop_no_value(&mut tmp, bu);
+                }
+
+                for x in out.into_iter().rev() {
+                    tmp.push(x);
+                }
+            }
             Instr::DropRange => {
                 let amount = xpop(&mut tmp, bu);
                 let start = xpop(&mut tmp, bu);
