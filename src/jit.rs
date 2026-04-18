@@ -35,6 +35,13 @@ pub(crate) enum CompilerError {
     JITError(#[from] JITError),
 }
 
+macro_rules! dbg_println {
+    ($($args:tt)*) => {
+        #[cfg(debug_assertions)]
+        println!($($args)*)
+    };
+}
+
 const CLAC_VALUE_STRIDE: i64 = size_of::<ClacValue>() as i64;
 const ALIGNED: MemFlags = MemFlags::new().with_aligned();
 
@@ -88,7 +95,7 @@ fn get_block_breaks(func: &[types::Instr]) -> Result<BTreeSet<usize>, JITError> 
     };
 
     for (i, instr) in func.iter().enumerate() {
-        println!("{} {:?}", i, instr);
+        dbg_println!("{} {:?}", i, instr);
         match instr {
             Instr::If => {
                 // you can jump ahead by a fixed amount
@@ -165,7 +172,7 @@ fn compile_block(
     bu: &mut FunctionBuilder,
     refs: &ImportRefs,
 ) {
-    println!("compiling block = {:?}", block);
+    dbg_println!("compiling block = {:?}", block);
     let line = *line;
     let block = *block;
 
@@ -362,12 +369,12 @@ fn compile_block(
             }
             Instr::FunctionCall(func) => {
                 let ClacRef::Resolved(idx) = func else {
-                    println!("TRYING TO CALL UNRESOLVED FUNCTION: {func:?}");
+                    dbg_println!("TRYING TO CALL UNRESOLVED FUNCTION: {func:?}");
                     bu.ins().trap(TrapCode::unwrap_user(67));
                     return;
                 };
                 let ClacFunction::User(Some(funcid), _) = &funcs[*idx] else {
-                    println!("Could not get func={func:?}");
+                    dbg_println!("Could not get func={func:?}");
                     bu.ins().trap(TrapCode::unwrap_user(67));
 
                     return;
@@ -509,7 +516,7 @@ fn compile_block(
     flush(&mut tmp, bu);
 
     if !is_last_block && let Some(next) = blockmap.get(&(head + line.len())) {
-        println!("GOT NEXT = {:?}", next);
+        dbg_println!("GOT NEXT = {:?}", next);
 
         flush(&mut tmp, bu);
         bu.ins().jump(next.1, &[]);
@@ -635,7 +642,7 @@ impl JITState {
         let sig = self.generate_signature(CallConv::Tail);
 
         let callees = self.build_callee_map(line, funcs)?;
-        println!("Callees = {:?}", callees);
+        dbg_println!("Callees = {:?}", callees);
 
         let types::JITState {
             ctx,
@@ -662,20 +669,20 @@ impl JITState {
         };
 
         let breaks = get_block_breaks(line)?;
-        println!("{:?}", breaks);
+        dbg_println!("{:?}", breaks);
         let slice_map = breaks_to_slicemap(breaks, line);
-        println!("{:?}", slice_map);
+        dbg_println!("{:?}", slice_map);
 
         let mut bu = FunctionBuilder::new(&mut ctx.func, fbctx);
 
         let block_map = make_blockmap(slice_map, &mut bu);
-        println!("{:?}", block_map);
+        dbg_println!("{:?}", block_map);
 
         let ClacBlock(_, entry) = block_map.get(&0).unwrap();
 
         let entry = *entry;
         bu.switch_to_block(entry);
-        println!("entry = {}", entry);
+        dbg_println!("entry = {}", entry);
         bu.append_block_params_for_function_params(entry);
 
         let stack = bu.block_params(entry)[0];
@@ -699,7 +706,7 @@ impl JITState {
             );
         }
 
-        println!("Before tailcall IR: {}", bu.func.display());
+        dbg_println!("Before tailcall IR: {}", bu.func.display());
 
         if let Some((_, ClacBlock(_, final_block))) = block_map.last_key_value() {
             // debug_assert!(final_block)
@@ -708,15 +715,15 @@ impl JITState {
 
         bu.finalize();
 
-        println!("Unoptimized IR: {}", ctx.func.display());
+        dbg_println!("Unoptimized IR: {}", ctx.func.display());
 
         ctx.set_disasm(true);
 
         module.define_function(id, ctx)?;
 
-        println!("Optimized IR: {}", ctx.func.display());
+        dbg_println!("Optimized IR: {}", ctx.func.display());
 
-        println!(
+        dbg_println!(
             "disasm: {}",
             ctx.compiled_code().unwrap().vcode.as_ref().unwrap()
         );
@@ -771,7 +778,7 @@ fn function_results_from_following_jump_path_to_return_unless_side_effect_found(
             } => {
                 let mut ret = Vec::new();
 
-                println!("RESOLVED RETS: {mapper:?}");
+                dbg_println!("RESOLVED RETS: {mapper:?}");
 
                 for mut arg in elist.as_slice(&cursor.func.dfg.value_lists) {
                     // resolve fully
@@ -840,7 +847,7 @@ fn optimize_tailcall(
             continue;
         }
 
-        println!("TAIL CALLING: {to_tailcall:?}");
+        dbg_println!("TAIL CALLING: {to_tailcall:?}");
 
         let new = cursor.func.dfg.make_inst(InstructionData::Call {
             opcode: cranelift::codegen::ir::Opcode::ReturnCall,
@@ -891,7 +898,7 @@ impl types::ClacState {
         for function in &mut self.funcmap.functions {
             if let ClacFunction::User(funcid, _) = function {
                 *funcid = Some(self.jit.create_wrapper(funcid.unwrap())?);
-                println!("Generated wrapper: {funcid:?}");
+                dbg_println!("Generated wrapper: {funcid:?}");
             }
         }
         Ok(())
@@ -905,7 +912,7 @@ impl types::ClacState {
             if let ClacFunction::User(fid, code) = function {
                 match self.jit.compile_function((*fid).unwrap(), code, clone) {
                     Ok(()) => {
-                        println!("Successfully compiled {fid:?} (code = {code:?})");
+                        dbg_println!("Successfully compiled {fid:?} (code = {code:?})");
                     }
                     Err(err) => {
                         panic!("Could not compile {fid:?} because {err:?} (code = {code:?})",);
@@ -921,7 +928,7 @@ impl types::ClacState {
         for function in &mut self.funcmap.functions {
             if let ClacFunction::User(funcid, code) = function {
                 *funcid = Some(self.jit.module.declare_anonymous_function(&sig)?);
-                println!("Function {funcid:?} has code = {code:?}");
+                dbg_println!("Function {funcid:?} has code = {code:?}");
             }
         }
 
