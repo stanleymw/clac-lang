@@ -87,9 +87,17 @@ Optimization Ideas:
 
 - Lazy JIT: Queue up function definitions @ toplevel, and don't compile until the next function call.
 
-- BUG: : test 1 if ;
+- BUG:
+    : test 1 if ;
 
 - FFI
+
+- BUG: (due to tail call)
+    clac++> : test 67 ;
+    []
+    clac++> : t2 if UNDEFINED 1 skip test ;
+    []
+    clac++> 0 t2
 
 */
 
@@ -655,7 +663,7 @@ impl JITState {
 
         if let Some((_, ClacBlock(_, final_block))) = block_map.last_key_value() {
             // debug_assert!(final_block)
-            // optimize_tailcall(&mut bu.func, *final_block);
+            optimize_tailcall(&mut bu.func, *final_block);
         }
 
         bu.finalize();
