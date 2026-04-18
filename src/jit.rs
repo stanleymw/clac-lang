@@ -37,7 +37,7 @@ pub(crate) enum CompilerError {
 
 macro_rules! dbg_println {
     ($($args:tt)*) => {
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "debug")]
         println!($($args)*)
     };
 }
