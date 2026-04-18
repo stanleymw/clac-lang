@@ -368,8 +368,7 @@ impl ClacState {
                 }
             };
 
-            // FIXME: remove this
-            if read == "int3" {
+            if cfg!(feature = "debug") && read == "int3" {
                 unsafe { std::arch::asm!("int3") };
                 continue;
             }
