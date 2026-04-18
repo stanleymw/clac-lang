@@ -305,6 +305,28 @@ fn compile_block(
             Instr::Quit => {
                 bu.ins().call(refs.quitfunc, &[]);
             }
+            Instr::Pick
+                if i > 0
+                    && let Some(&Instr::Literal(n)) = line.get(i - 1) =>
+            {
+                assert_eq!(value_to_const(bu.func, tmp.pop().unwrap()).unwrap(), n);
+
+                let n: usize = n.try_into().unwrap();
+
+                // TODO: improve
+                if n <= tmp.len() {
+                    tmp.push(tmp[tmp.len() - n]);
+                } else {
+                    let amt: i64 = (n - tmp.len()).try_into().unwrap();
+                    assert!(amt > 0);
+
+                    let x: i32 = (-amt * CLAC_VALUE_STRIDE).try_into().unwrap();
+
+                    let rsp = bu.use_var(stack);
+                    let loaded = bu.ins().load(CRANELIFT_VALUE, ALIGNED, rsp, x);
+                    tmp.push(loaded);
+                }
+            }
             Instr::Pick => {
                 let popped = xpop(&mut tmp, bu);
 
@@ -461,7 +483,7 @@ fn compile_block(
                 let amount = xpop(&mut tmp, bu);
                 let start = xpop(&mut tmp, bu);
 
-                let value_sz: i64 = std::mem::size_of::<ClacValue>().try_into().unwrap();
+                let value_sz: i64 = CLAC_VALUE_STRIDE.try_into().unwrap();
 
                 let start_strided = bu.ins().imul_imm(start, value_sz);
                 let amount_strided = bu.ins().imul_imm(amount, value_sz);

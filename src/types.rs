@@ -5,7 +5,7 @@ use std::io;
 use ahash::AHashMap;
 use cranelift::{
     codegen::Context,
-    prelude::{AbiParam, FunctionBuilderContext, Signature, types::I64},
+    prelude::{AbiParam, FunctionBuilderContext, Signature, Type, types::I64},
 };
 use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{FuncId, Module};
@@ -14,6 +14,8 @@ use thiserror::Error;
 use crate::{builtins, jit_builtins};
 
 pub type Value = i64;
+// TODO: submit PR TO MAKE Type::int CONST
+// pub const CRANELIFT_VALUE: cranelift::prelude::Type = Type::int(Value::BITS).unwrap();
 pub const CRANELIFT_VALUE: cranelift::prelude::Type = I64;
 
 pub(crate) type ValueStack = Vec<Value>;
