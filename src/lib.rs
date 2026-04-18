@@ -287,6 +287,33 @@ impl ClacState {
         Ok(())
     }
 
+    fn flush_queue_and_recompile(&mut self) {
+        for (name, f) in self.undefined_functions.drain(..) {
+            match self.funcmap.map.get(&name) {
+                Some(idx) => {
+                    // replace already defined function
+                    self.funcmap.functions[*idx] = Function::User(None, f);
+                }
+                None => {
+                    // create new function
+                    let len = self.funcmap.functions.len();
+                    self.funcmap.functions.push(Function::User(None, f));
+                    self.funcmap.map.insert(name.to_string(), len);
+                }
+            };
+        }
+
+        resolve_funcmap(&mut self.funcmap);
+
+        assert!(self.undefined_functions.is_empty());
+
+        // Reset the JIT
+        let old = std::mem::replace(&mut self.jit, JITState::new().unwrap());
+        unsafe { old.module.free_memory() };
+
+        self.declare_and_compile_all_functions().unwrap();
+    }
+
     /// Execute a slice of [`Token`]s representing a line of Clac++ code.
     pub fn execute_tokens(&mut self, mut line: &[Token]) -> Result<(), ExecError> {
         let mut cur_func: Option<(&String, Code)> = None;
@@ -300,30 +327,9 @@ impl ClacState {
                     (rem, Some((name, Vec::new())))
                 }
                 ([Token::Semicolon, rem @ ..], Some((name, f))) => {
-                    match funcs.map.get(name) {
-                        Some(idx) => {
-                            // replace already defined function
-                            funcs.functions[*idx] = Function::User(None, f);
-                        }
-                        None => {
-                            // create new function
-                            let len = funcs.functions.len();
-                            funcs.functions.push(Function::User(None, f));
-                            funcs.map.insert(name.to_string(), len);
-                        }
-                    };
+                    self.undefined_functions.push((name.to_string(), f));
 
                     // first, resolve function names to indices in FuncMap
-                    resolve_funcmap(funcs);
-
-                    // Reset the JIT
-                    let old = std::mem::replace(&mut self.jit, JITState::new().unwrap());
-                    unsafe { old.module.free_memory() };
-
-                    self.declare_and_compile_all_functions().unwrap();
-
-                    funcs = &mut self.funcmap;
-                    stack = &mut self.stack;
 
                     (rem, None)
                 }
@@ -335,6 +341,15 @@ impl ClacState {
                     (rem, Some((nm, f)))
                 }
                 ([tok, rem @ ..], None) => {
+                    if let Token::Identifier(_) = tok
+                        && !self.undefined_functions.is_empty()
+                    {
+                        self.flush_queue_and_recompile();
+
+                        funcs = &mut self.funcmap;
+                        stack = &mut self.stack;
+                    }
+
                     match Self::execute(
                         funcs,
                         stack,

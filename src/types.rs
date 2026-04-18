@@ -171,6 +171,8 @@ pub struct ClacState {
     // JIT Stuff
     pub(crate) jit: JITState, // TODO: make JIT optional
 
+    pub(crate) undefined_functions: Vec<(String, Code)>,
+
     // Clac Stuff
     pub(crate) stack: Stack,
     pub(crate) funcmap: FuncMap,
@@ -324,6 +326,7 @@ impl ClacState {
         Ok(ClacState {
             jit: JITState::new()?,
             stack: Stack::new(capacity)?,
+            undefined_functions: Vec::new(),
             funcmap: FuncMap::default(),
         })
     }
