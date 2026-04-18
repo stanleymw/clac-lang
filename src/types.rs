@@ -7,7 +7,7 @@ use cranelift::{
     codegen::Context,
     prelude::{AbiParam, FunctionBuilderContext, Signature, types::I64},
 };
-use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{FuncId, Module};
 use thiserror::Error;
 
@@ -241,6 +241,10 @@ impl JITState {
             ],
             cranelift_module::default_libcall_names(),
         )?;
+
+        builder.memory_provider(Box::new(
+            ArenaMemoryProvider::new_with_size(1_000_000_000).unwrap(),
+        ));
 
         builder.symbol("__rprint__", jit_builtins::print_value as *const u8);
         builder.symbol("__rquit__", jit_builtins::quit as *const u8);
