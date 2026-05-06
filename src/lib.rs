@@ -3,6 +3,12 @@ mod jit;
 mod jit_builtins;
 pub mod types;
 
+use ahash::{HashMap, HashMapExt};
+
+use cranelift::prelude::isa::OwnedTargetIsa;
+use cranelift_module::ModuleError;
+use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
+use thiserror::Error;
 use types::*;
 
 // resolve functions so we don't need to do a costly hashmap lookup
@@ -335,7 +341,7 @@ impl ClacState {
                     return Err(ExecError::BadFunctionDefinition);
                 }
                 ([tok, rem @ ..], Some((nm, mut f))) => {
-                    f.push(tok.clone().token_to_instruction(funcs));
+                    f.push(tok.clone().to_instruction(Some(funcs)));
                     (rem, Some((nm, f)))
                 }
                 ([tok, rem @ ..], None) => {
@@ -352,7 +358,7 @@ impl ClacState {
                         funcs,
                         stack,
                         &self.jit,
-                        &tok.clone().token_to_instruction(funcs),
+                        &tok.clone().to_instruction(Some(funcs)),
                     )? {
                         ExecRes::Executed => (rem, None),
                         ExecRes::Skip(n) => match rem.split_at_checked(n) {
@@ -377,4 +383,70 @@ impl ClacState {
 
         self.execute_tokens(&parsed)
     }
+}
+
+#[derive(Debug, Error)]
+pub enum CompileError {
+    #[error("Bad Function Definition")]
+    BadFunctionDefinition,
+
+    #[error("Top level is not allowed in Ahead of time compilation.")]
+    TopLevelDisallowed,
+
+    #[error("Cranelift module error: {0}")]
+    CraneliftModuleError(#[from] ModuleError),
+}
+
+fn extract_functions(mut line: &[Token]) -> Result<HashMap<&str, Code>, CompileError> {
+    let mut cur_func: Option<(&str, Code)> = None;
+    let mut res: HashMap<&str, Code> = HashMap::new();
+
+    loop {
+        (line, cur_func) = match (line, cur_func) {
+            ([Token::Colon, Token::Identifier(name), rem @ ..], None) => {
+                (rem, Some((name.as_str(), Vec::new())))
+            }
+            ([Token::Semicolon, rem @ ..], Some((name, f))) => {
+                res.insert(name, f);
+
+                // first, resolve function names to indices in FuncMap
+
+                (rem, None)
+            }
+            ([Token::Colon | Token::Semicolon, ..], _) => {
+                return Err(CompileError::BadFunctionDefinition);
+            }
+            ([tok, rem @ ..], Some((nm, mut f))) => {
+                f.push(tok.clone().to_instruction(None));
+                (rem, Some((nm, f)))
+            }
+            ([tok, rem @ ..], None) => return Err(CompileError::TopLevelDisallowed),
+            ([], Some(_)) => return Err(CompileError::BadFunctionDefinition),
+            ([], None) => return Ok(res),
+        };
+    }
+}
+
+pub fn compile_tokens(
+    mut line: &[Token],
+    isa: OwnedTargetIsa,
+    object_name: String,
+) -> Result<ObjectProduct, CompileError> {
+    // we need to ensure that it is all functions
+    let functions = extract_functions(line)?;
+
+    let module = ObjectBuilder::new(isa, object_name, cranelift_module::default_libcall_names())?;
+    let module = ObjectModule::new(module);
+
+    Ok(module.finish())
+}
+
+pub fn compile_str(
+    line: &str,
+    isa: OwnedTargetIsa,
+    object_name: String,
+) -> Result<ObjectProduct, CompileError> {
+    let parsed: Vec<Token> = line.split_whitespace().map(parse).collect();
+
+    compile_tokens(&parsed, isa, object_name)
 }

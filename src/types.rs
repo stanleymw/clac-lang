@@ -103,17 +103,20 @@ pub enum Token {
 
 impl Token {
     // TODO: maybe it's unnecessary to own the instructions?
-    pub(crate) fn token_to_instruction(self, functions: &FuncMap) -> Instr {
+    pub(crate) fn to_instruction(self, functions: Option<&FuncMap>) -> Instr {
         match self {
             Token::Literal(n) => Instr::Literal(n),
             Token::Identifier(name) if let Some(inst) = builtins::FUNCTIONS.get(name.as_str()) => {
                 inst.clone()
             }
-            Token::Identifier(name) => match functions.map.get(&name) {
-                Some(idx) => match functions.functions[*idx] {
-                    Function::User(_, _) => Instr::FunctionCall(FuncRef::Resolved(*idx)),
-                },
+            Token::Identifier(name) => match functions {
                 None => Instr::FunctionCall(FuncRef::Unresolved(name)),
+                Some(functions) => match functions.map.get(&name) {
+                    Some(idx) => match functions.functions[*idx] {
+                        Function::User(_, _) => Instr::FunctionCall(FuncRef::Resolved(*idx)),
+                    },
+                    None => Instr::FunctionCall(FuncRef::Unresolved(name)),
+                },
             },
             Token::Quit => Instr::Quit,
             Token::Print => Instr::Print,

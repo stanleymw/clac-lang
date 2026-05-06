@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::types::{self, ArithOp, CRANELIFT_VALUE, Instr, JITFunction, JITState, MemOp};
-use ahash::AHashMap;
+use ahash::{HashMap, HashMapExt};
 use cranelift::{
     codegen::{
         cursor::{Cursor, CursorPosition, FuncCursor},
@@ -166,7 +166,7 @@ fn compile_block(
     isa: &dyn TargetIsa,
     total_len: usize,
     blockmap: &BlockMap,
-    calleemap: &ahash::HashMap<FuncId, FuncRef>,
+    calleemap: &HashMap<FuncId, FuncRef>,
     funcs: &[ClacFunction],
     stack: Variable,
     bu: &mut FunctionBuilder,
@@ -550,28 +550,32 @@ pub enum JITError {
     CallsUnknownFunctions,
 }
 
+fn generate_clac_function_signature(isa: &dyn TargetIsa, callconv: CallConv) -> Signature {
+    let ptr_t = isa.pointer_type();
+    let ptr_arg = AbiParam::new(ptr_t);
+
+    Signature {
+        params: vec![ptr_arg],  // *mut ClacValue
+        returns: vec![ptr_arg], // *mut ClacValue
+        call_conv: callconv,
+    }
+}
+
 impl JITState {
     pub(crate) fn get_function(&self, func: FuncId) -> JITFunction {
         unsafe { transmute_copy(&self.module.get_finalized_function(func)) }
     }
 
     fn generate_signature(&self, callconv: CallConv) -> Signature {
-        let ptr_t = self.module.isa().pointer_type();
-        let ptr_arg = AbiParam::new(ptr_t);
-
-        Signature {
-            params: vec![ptr_arg],  // *mut ClacValue
-            returns: vec![ptr_arg], // *mut ClacValue
-            call_conv: callconv,
-        }
+        generate_clac_function_signature(self.module.isa(), callconv)
     }
 
     fn build_callee_map(
         &mut self,
         line: &[types::Instr],
         funcs: &[ClacFunction],
-    ) -> Result<AHashMap<FuncId, FuncRef>, JITError> {
-        let mut ret = AHashMap::new();
+    ) -> Result<HashMap<FuncId, FuncRef>, JITError> {
+        let mut ret = HashMap::new();
 
         for instr in line {
             if let Instr::FunctionCall(fr) = instr {
@@ -717,7 +721,9 @@ impl JITState {
 
         dbg_println!("Unoptimized IR: {}", ctx.func.display());
 
-        ctx.set_disasm(true);
+        if cfg!(feature = "debug") {
+            ctx.set_disasm(true);
+        }
 
         module.define_function(id, ctx)?;
 
@@ -747,7 +753,7 @@ fn trivially_has_side_effects(opcode: cranelift::codegen::ir::Opcode) -> bool {
 fn function_results_from_following_jump_path_to_return_unless_side_effect_found(
     cursor: &mut FuncCursor,
 ) -> Option<Vec<Value>> {
-    let mut mapper = AHashMap::new();
+    let mut mapper = HashMap::new();
 
     while let Some(inst) = cursor.next_inst() {
         let real = cursor.func.dfg.insts[inst];
