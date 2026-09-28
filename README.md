@@ -1,5 +1,5 @@
 # **Clac++**
-This is the reference implementation/vm for **Clac++**, which is a simple stack-based postfix (reverse polish notation) calculator/programming language. It supports programmer-defined functions, control flow and unrestricted recursion.
+This is a (Just in Time/Ahead of time) compiler and reference implementation for **Clac++**, which is a simple stack-based postfix (reverse polish notation) calculator/programming language. It supports programmer-defined functions, control flow and unrestricted recursion.
 
 ```console
 $ cat print2.clac
